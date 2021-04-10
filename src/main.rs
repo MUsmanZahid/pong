@@ -238,11 +238,10 @@ fn main() {
     let mut renderer = Renderer::init(&window);
     let delta = 1.5E-2;
 
-    let mut position = Vector2 { x: 0.0, y: 0.0 };
+    let mut position = Vector2 { x: 0.0, y: 0.5 };
     let paddle = renderer.create_sprite("textures/paddle.png", position);
+    let ball = renderer.create_sprite("textures/ball.png", position);
 
-    // TODO: Handle the focus in and out events explicitly. Add a method to the window structure to
-    // change the keyboard repeat rate and delay to a desired value.
     while !window.exiting {
         while let Some(event) = window.poll_event() {
             match event {
@@ -271,6 +270,8 @@ fn main() {
         }
 
         if let Some(index) = renderer.begin_scene(0.7, 0.4, 0.8) {
+            renderer.draw(paddle, Vector2 { x: 0.0, y: -0.5 });
+            renderer.draw(ball, Vector2 { x: 0.0, y: 0.0 });
             renderer.draw(paddle, position);
             renderer.end_scene();
             renderer.present(index);

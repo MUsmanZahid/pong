@@ -106,7 +106,6 @@ impl Window {
             | xcb::EventMask::KeyRelease as u32
             | xcb::EventMask::ButtonPress as u32
             | xcb::EventMask::ButtonRelease as u32
-            | xcb::EventMask::PointerMotion as u32
             | xcb::EventMask::StructureNotify as u32
             | xcb::EventMask::FocusChange as u32];
         unsafe {
