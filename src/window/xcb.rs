@@ -160,6 +160,8 @@ impl Window {
 
                 let key = match key_code {
                     36 => Key::Enter,
+                    38 => Key::A,
+                    40 => Key::D,
                     113 => Key::ArrowLeft,
                     114 => Key::ArrowRight,
                     _ => {

@@ -1,0 +1,12 @@
+SRC = src
+
+rule cfs
+    command = glslc -fshader-stage=fragment $in -o $out
+    description = Compiling fragment shader $in to $out
+
+rule cvs
+    command = glslc -fshader-stage=vertex $in -o $out
+    description = Compiling vertex shader $in to $out
+
+build triangle.frag.spv: cfs $SRC/triangle.frag.glsl
+build triangle.vert.spv: cvs $SRC/triangle.vert.glsl

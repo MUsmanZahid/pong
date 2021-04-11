@@ -409,6 +409,38 @@ struct Texture {
     memory: NonNull<vk::DeviceMemory>,
 }
 
+struct Queues {
+    graphics: *mut vk::Queue,
+    presentation: *mut vk::Queue,
+    transfer: *mut vk::Queue,
+}
+
+impl Queues {
+    fn retrieve(
+        device_table: &DeviceTable,
+        device: *mut vk::Device,
+        queue_family_indices: [u32; 3],
+    ) -> Self {
+        let get_device_queue = device_table.get_device_queue;
+
+        let mut graphics = null_mut();
+        get_device_queue(device, queue_family_indices[0], 0, &mut graphics);
+
+        let mut presentation = null_mut();
+        get_device_queue(device, queue_family_indices[1], 0, &mut presentation);
+
+        let mut transfer = null_mut();
+        get_device_queue(device, queue_family_indices[2], 0, &mut transfer);
+
+        let queues = Queues {
+            graphics,
+            presentation,
+            transfer,
+        };
+        return queues;
+    }
+}
+
 pub struct Renderer {
     frame_resources: Box<[PerFrameResources]>,
     sprites: Vec<Sprite>,                // Static over renderer lifetime
@@ -419,9 +451,7 @@ pub struct Renderer {
     set_layout: NonNull<vk::DescriptorSetLayout>,
     pipeline: *mut vk::Pipeline,
     pipeline_layout: *mut vk::PipelineLayout,
-    graphics: *mut vk::Queue,
-    presentation: *mut vk::Queue,
-    transfer: *mut vk::Queue,
+    queues: Queues,
     render_target: RenderTarget,
     device: *mut vk::Device,
     physical_device: NonNull<vk::PhysicalDevice>,
@@ -559,32 +589,12 @@ impl Renderer {
         );
         let secondary = resources.secondaries[index];
 
-        // Update combined image sampler
-        // Begin secondary command buffer
-        // Set scissor and viewport
-        // Bind graphics pipeline
-        // Bind vertex buffer
-        // Bind combined image sampler descriptor set
-        // Draw
-
-        let inheritance_info = vk::CommandBufferInheritanceInfo {
-            stype: vk::StructureType::CommandBufferInheritanceInfo,
-            next: null(),
-            render_pass: self.render_target.render_pass,
-            subpass: 0,
-            framebuffer: null_mut(),
-            occlusion_query_enable: false as u32,
-            query_flags: 0,
-            pipeline_statistics: 0,
-        };
-        let info = vk::CommandBufferBeginInfo {
-            stype: vk::StructureType::CommandBufferBeginInfo,
-            next: null(),
-            usage: vk::CommandBufferUsageFlagBits::OneTimeSubmit as u32
-                | vk::CommandBufferUsageFlagBits::RenderPassContinue as u32,
-            inheritance_info: &inheritance_info,
-        };
-        (self.device_table.begin_command_buffer)(secondary, &info);
+        command_buffer_begin_secondary(
+            &self.device_table,
+            secondary,
+            self.render_target.render_pass,
+            vk::CommandBufferUsageFlagBits::OneTimeSubmit as u32,
+        );
 
         descriptor_set_update_sampled_image(
             &self.device_table,
@@ -602,13 +612,7 @@ impl Renderer {
             resources.descriptor_sets[index],
         );
 
-        (self.device_table.cmd_bind_vertex_buffers)(
-            secondary,
-            0,
-            1,
-            &self.vertex_buffer.buffer,
-            &offset,
-        );
+        bind_vertex_buffer(&self.device_table, secondary, &self.vertex_buffer, offset);
         (self.device_table.cmd_draw)(secondary, 6, 1, 0, 0);
         (self.device_table.end_command_buffer)(secondary);
     }
@@ -630,7 +634,7 @@ impl Renderer {
         command_buffer_end_and_submit(
             &self.device_table,
             primary,
-            self.graphics,
+            self.queues.graphics,
             Some(self.presentation_sync.image_acquired[current_frame]),
             vk::PipelineStageFlagBits::ColorAttachmentOutput as u32,
             Some(self.presentation_sync.image_ready[current_frame]),
@@ -677,8 +681,8 @@ impl Renderer {
         );
 
         // Shader modules
-        let fragment = create_shader_module(&device_table, device, "target/triangle.frag.spv");
-        let vertex = create_shader_module(&device_table, device, "target/triangle.vert.spv");
+        let fragment = create_shader_module(&device_table, device, "shaders/triangle.frag.spv");
+        let vertex = create_shader_module(&device_table, device, "shaders/triangle.vert.spv");
 
         let bindings = [vk::DescriptorSetLayoutBinding {
             binding: 0,
@@ -702,14 +706,9 @@ impl Renderer {
         (device_table.destroy_shader_module)(device, vertex, null());
 
         // Queues
-        let mut graphics = null_mut();
-        (device_table.get_device_queue)(device, queue_family_indices[0], 0, &mut graphics);
-        let mut presentation = null_mut();
-        (device_table.get_device_queue)(device, queue_family_indices[1], 0, &mut presentation);
+        let queues = Queues::retrieve(&device_table, device, queue_family_indices);
 
-        // Command pool and buffers
         let num_images = render_target.images.len();
-
         // Synchronization primitives required for presentation
         let presentation_sync = PresentationSync::create(&device_table, device, num_images);
 
@@ -724,10 +723,7 @@ impl Renderer {
                 | vk::MemoryPropertyFlagBits::HostVisible as u32,
         );
 
-        let mut transfer = null_mut();
-        (device_table.get_device_queue)(device, queue_family_indices[2], 0, &mut transfer);
         let transfer_pool = create_command_pool(&device_table, device, 0, queue_family_indices[2]);
-
         let frame_resources: Box<[PerFrameResources]> = (0..num_images)
             .map(|_| PerFrameResources::create(&device_table, device, queue_family_indices[0]))
             .collect();
@@ -741,10 +737,8 @@ impl Renderer {
             set_layout,
             pipeline,
             pipeline_layout,
+            queues,
             presentation_sync,
-            graphics,
-            presentation,
-            transfer,
             render_target,
             device,
             physical_device,
@@ -880,7 +874,7 @@ impl Renderer {
         command_buffer_end_and_submit(
             &self.device_table,
             transfer_buffer,
-            self.transfer,
+            self.queues.transfer,
             None,
             0,
             None,
@@ -921,7 +915,7 @@ impl Renderer {
             image_indices: &(index as u32),
             results: null_mut(),
         };
-        (self.device_table.queue_present_khr)(self.presentation, &info);
+        (self.device_table.queue_present_khr)(self.queues.presentation, &info);
 
         self.presentation_sync.current_frame += 1;
         if self.presentation_sync.num_images <= self.presentation_sync.current_frame {
@@ -994,24 +988,6 @@ fn allocate_command_buffer(
     return command_buffer;
 }
 
-fn allocate_command_buffers(
-    table: &DeviceTable,
-    device: *mut vk::Device,
-    command_pool: *mut vk::CommandPool,
-    level: vk::CommandBufferLevel,
-    buffer: &mut [*mut vk::CommandBuffer],
-) {
-    let command_buffer_count = buffer.len() as u32;
-    let command_buffer_info = vk::CommandBufferAllocateInfo {
-        stype: vk::StructureType::CommandBufferAllocateInfo,
-        next: null(),
-        command_pool,
-        level,
-        command_buffer_count,
-    };
-    (table.allocate_command_buffers)(device, &command_buffer_info, buffer.as_mut_ptr());
-}
-
 fn allocate_memory(
     instance_table: &InstanceTable,
     device_table: &DeviceTable,
@@ -1069,8 +1045,9 @@ fn bind_vertex_buffer(
     device_table: &DeviceTable,
     command_buffer: *mut vk::CommandBuffer,
     mbb: &MBB,
+    offset: vk::DeviceSize,
 ) {
-    (device_table.cmd_bind_vertex_buffers)(command_buffer, 0, 1, &mbb.buffer, &0);
+    (device_table.cmd_bind_vertex_buffers)(command_buffer, 0, 1, &mbb.buffer, &offset);
 }
 
 fn command_buffer_begin_primary(
@@ -1087,8 +1064,29 @@ fn command_buffer_begin_primary(
     (device_table.begin_command_buffer)(command_buffer, &info);
 }
 
-fn command_buffer_reset(dt: &DeviceTable, command_buffer: *mut vk::CommandBuffer) {
-    (dt.reset_command_buffer)(command_buffer, 0);
+fn command_buffer_begin_secondary(
+    device_table: &DeviceTable,
+    command_buffer: *mut vk::CommandBuffer,
+    render_pass: *mut vk::RenderPass,
+    usage: vk::CommandBufferUsageFlags,
+) {
+    let inheritance_info = vk::CommandBufferInheritanceInfo {
+        stype: vk::StructureType::CommandBufferInheritanceInfo,
+        next: null(),
+        render_pass,
+        subpass: 0,
+        framebuffer: null_mut(),
+        occlusion_query_enable: false as u32,
+        query_flags: 0,
+        pipeline_statistics: 0,
+    };
+    let info = vk::CommandBufferBeginInfo {
+        stype: vk::StructureType::CommandBufferBeginInfo,
+        next: null(),
+        usage: usage | vk::CommandBufferUsageFlagBits::RenderPassContinue as u32,
+        inheritance_info: &inheritance_info,
+    };
+    (device_table.begin_command_buffer)(command_buffer, &info);
 }
 
 fn command_buffer_end_and_submit(
