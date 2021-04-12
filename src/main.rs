@@ -24,7 +24,7 @@ mod input {
 }
 
 mod math {
-    use std::ops::AddAssign;
+    use std::ops::{AddAssign, Neg};
 
     #[derive(Clone, Copy, Debug)]
     pub struct Vector2 {
@@ -36,6 +36,16 @@ mod math {
         fn add_assign(&mut self, rhs: Self) {
             self.x += rhs.x;
             self.y += rhs.y;
+        }
+    }
+
+    impl Neg for Vector2 {
+        type Output = Self;
+
+        fn neg(mut self) -> Self::Output {
+            self.x = -self.x;
+            self.y = -self.y;
+            return self;
         }
     }
 }
@@ -92,6 +102,8 @@ fn set_keyboard_delay_and_repeat(delay: Option<Duration>, repeat: Option<u32>) {
 struct Ball {
     position: Vector2,
     velocity: Vector2,
+    half_width: f32,
+    half_height: f32,
     handle: usize,
 }
 
@@ -99,33 +111,95 @@ impl Ball {
     fn centered(renderer: &mut Renderer, velocity: Vector2) -> Self {
         let position = Vector2 { x: 0.0, y: 0.0 };
         let handle = renderer.create_sprite("textures/ball.png", position);
+        let (half_width, half_height) = renderer.sprite_half_dimensions(handle);
         let ball = Self {
             position,
             velocity,
+            half_width,
+            half_height,
             handle,
         };
         return ball;
     }
 
-    fn simulate(&mut self) {
+    fn simulate(&mut self, top_paddle: &Paddle, bottom_paddle: &Paddle) -> bool {
         self.position += self.velocity;
+
+        // Modelling top-paddle interaction
+        let ball_bottom_edge = self.position.y - self.half_height;
+        let ball_top_edge = self.position.y + self.half_height;
+        let ball_right_edge = self.position.x + self.half_width;
+        let ball_left_edge = self.position.x - self.half_width;
+
+        let top_paddle_bottom_edge = top_paddle.position.y - top_paddle.half_height;
+        let top_paddle_top_edge = top_paddle.position.y + top_paddle.half_height;
+        let top_paddle_right_edge = top_paddle.position.x + top_paddle.half_width;
+        let top_paddle_left_edge = top_paddle.position.x - top_paddle.half_width;
+
+        let bottom_paddle_bottom_edge = bottom_paddle.position.y - bottom_paddle.half_height;
+        let bottom_paddle_top_edge = bottom_paddle.position.y + bottom_paddle.half_height;
+        let bottom_paddle_right_edge = bottom_paddle.position.x + bottom_paddle.half_width;
+        let bottom_paddle_left_edge = bottom_paddle.position.x - bottom_paddle.half_width;
+
+        if self.velocity.y > 0.0 {
+            if top_paddle_bottom_edge <= ball_top_edge && ball_top_edge <= top_paddle_top_edge {
+                if ball_right_edge >= top_paddle_left_edge
+                    && ball_left_edge <= top_paddle_right_edge
+                {
+                    self.velocity.y = -self.velocity.y;
+                    return false;
+                }
+            }
+        } else {
+            if bottom_paddle_top_edge >= ball_bottom_edge
+                && ball_bottom_edge >= bottom_paddle_bottom_edge
+            {
+                if ball_right_edge >= bottom_paddle_left_edge
+                    && ball_left_edge <= bottom_paddle_right_edge
+                {
+                    self.velocity.y = -self.velocity.y;
+                    return false;
+                }
+            }
+        }
+
+        // Play area's vertical bounds were exceeded
+        if self.position.y <= -1.0 + self.half_height {
+            self.velocity.y = -self.velocity.y;
+            return true;
+        } else if self.position.y >= 1.0 - self.half_height {
+            self.velocity.y = -self.velocity.y;
+            return true;
+        }
+
+        // Play area's horizontal bounds were exceeded
+        if self.position.x <= -1.0 + self.half_width {
+            self.velocity.x = -self.velocity.x;
+        } else if self.position.x >= 1.0 - self.half_width {
+            self.velocity.x = -self.velocity.x;
+        }
+
+        return false;
     }
 }
 
 struct Paddle {
     position: Vector2,
     half_width: f32,
-    _half_height: f32,
+    half_height: f32,
     handle: usize,
 }
 
 impl Paddle {
     fn bottom(handle: usize, (half_width, half_height): (f32, f32)) -> Self {
-        let position = Vector2 { x: 0.0, y: -0.5 };
+        let position = Vector2 {
+            x: 0.0,
+            y: -1.0 + half_height,
+        };
         let paddle = Self {
             position,
             half_width,
-            _half_height: half_height,
+            half_height,
             handle,
         };
         return paddle;
@@ -148,15 +222,24 @@ impl Paddle {
     }
 
     fn top(handle: usize, (half_width, half_height): (f32, f32)) -> Self {
-        let position = Vector2 { x: 0.0, y: 0.5 };
+        let position = Vector2 {
+            x: 0.0,
+            y: 1.0 - half_height,
+        };
         let paddle = Self {
             position,
             half_width,
-            _half_height: half_height,
+            half_height,
             handle,
         };
         return paddle;
     }
+}
+
+#[derive(Debug)]
+enum GameState {
+    Neutral,
+    SetActive,
 }
 
 fn main() {
@@ -171,22 +254,36 @@ fn main() {
         let top = Paddle::top(handle, half_dimensions);
         (bottom, top)
     };
-    let mut ball = Ball::centered(&mut renderer, Vector2 { x: 0.0, y: 5.0E-3 });
+    let mut ball = Ball::centered(
+        &mut renderer,
+        Vector2 {
+            x: 1.0E-2,
+            y: 9.0E-3,
+        },
+    );
 
+    let mut state = GameState::Neutral;
     while !window.exiting {
         while let Some(event) = window.poll_event() {
-            match event {
-                Event::KeyPress(Key::ArrowLeft) => bottom_paddle.move_left(delta),
-                Event::KeyPress(Key::ArrowRight) => bottom_paddle.move_right(delta),
-                Event::KeyPress(Key::A) => top_paddle.move_left(delta),
-                Event::KeyPress(Key::D) => top_paddle.move_right(delta),
-                Event::WindowFocused => {
-                    set_keyboard_delay_and_repeat(Some(Duration::from_millis(10)), Some(25));
-                }
-                Event::WindowUnfocused => {
-                    set_keyboard_delay_and_repeat(None, None);
-                }
-                _ => {}
+            match state {
+                GameState::Neutral => {
+                    if let Event::KeyPress(Key::Enter) = event {
+                        state = GameState::SetActive;
+                        set_keyboard_delay_and_repeat(Some(Duration::from_millis(10)), Some(25));
+                    } else if let Event::WindowUnfocused = event {
+                        set_keyboard_delay_and_repeat(None, None);
+                    }
+                },
+                GameState::SetActive => {
+                    match event {
+                        Event::KeyPress(Key::ArrowLeft) => bottom_paddle.move_left(delta),
+                        Event::KeyPress(Key::ArrowRight) => bottom_paddle.move_right(delta),
+                        Event::KeyPress(Key::A) => top_paddle.move_left(delta),
+                        Event::KeyPress(Key::D) => top_paddle.move_right(delta),
+                        Event::WindowUnfocused => set_keyboard_delay_and_repeat(None, None),
+                        _ => {}
+                    }
+                },
             }
         }
 
@@ -200,7 +297,18 @@ fn main() {
             renderer.resize(&window);
         }
 
-        ball.simulate();
+        if let GameState::SetActive = state {
+            if ball.simulate(&top_paddle, &bottom_paddle) {
+                state = GameState::Neutral;
+
+                ball.velocity = -ball.velocity;
+                ball.position = Vector2 { x: 0.0, y: 0.0 };
+                top_paddle.position.x = 0.0;
+                bottom_paddle.position.x = 0.0;
+                
+                set_keyboard_delay_and_repeat(None, None);
+            }
+        }
     }
 
     renderer.deinit();

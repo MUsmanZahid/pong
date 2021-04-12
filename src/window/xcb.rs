@@ -177,10 +177,6 @@ impl Window {
                 }
             }
             xcb::FOCUS_IN => {
-                std::process::Command::new("xset")
-                    .args(&["r", "rate", "10", "25"])
-                    .spawn()
-                    .unwrap();
                 Some(Event::WindowFocused)
             }
             xcb::FOCUS_OUT => {
