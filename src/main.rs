@@ -51,6 +51,7 @@ mod math {
 }
 
 mod ffi;
+mod font;
 mod gfx;
 mod window;
 
@@ -110,7 +111,7 @@ struct Ball {
 impl Ball {
     fn centered(renderer: &mut Renderer, velocity: Vector2) -> Self {
         let position = Vector2 { x: 0.0, y: 0.0 };
-        let handle = renderer.create_sprite("textures/ball.png", position);
+        let handle = renderer.create_sprite_from_path("textures/ball.png");
         let (half_width, half_height) = renderer.sprite_half_dimensions(handle);
         let ball = Self {
             position,
@@ -242,13 +243,25 @@ enum GameState {
     SetActive,
 }
 
+macro_rules! cstr {
+    ( $s:literal ) => {{
+        let s = concat!($s, "\0");
+        std::ffi::CStr::from_bytes_with_nul(s.as_bytes()).unwrap()
+    }};
+}
+
 fn main() {
+    let font_path = cstr!("/usr/share/fonts/TTF/Comfortaa-Light.ttf");
+    let (_glyphs, _coverage) = font::generate_bitmap(font_path, 64);
+
     let mut window = Window::new("Pong!", "rose", 800, 600);
     let mut renderer = Renderer::init(&window);
-    let delta = 1.5E-2;
 
+    // renderer.draw_text_centered("Usman", Vector2 { x: -1.0, y: 0.0 });
+
+    let delta = 3.0E-2;
     let (mut bottom_paddle, mut top_paddle) = {
-        let handle = renderer.create_sprite("textures/paddle.png", Vector2 { x: 0.0, y: 0.0 });
+        let handle = renderer.create_sprite_from_path("textures/paddle.png");
         let half_dimensions = renderer.sprite_half_dimensions(handle);
         let bottom = Paddle::bottom(handle, half_dimensions);
         let top = Paddle::top(handle, half_dimensions);
@@ -273,16 +286,14 @@ fn main() {
                     } else if let Event::WindowUnfocused = event {
                         set_keyboard_delay_and_repeat(None, None);
                     }
-                },
-                GameState::SetActive => {
-                    match event {
-                        Event::KeyPress(Key::ArrowLeft) => bottom_paddle.move_left(delta),
-                        Event::KeyPress(Key::ArrowRight) => bottom_paddle.move_right(delta),
-                        Event::KeyPress(Key::A) => top_paddle.move_left(delta),
-                        Event::KeyPress(Key::D) => top_paddle.move_right(delta),
-                        Event::WindowUnfocused => set_keyboard_delay_and_repeat(None, None),
-                        _ => {}
-                    }
+                }
+                GameState::SetActive => match event {
+                    Event::KeyPress(Key::ArrowLeft) => bottom_paddle.move_left(delta),
+                    Event::KeyPress(Key::ArrowRight) => bottom_paddle.move_right(delta),
+                    Event::KeyPress(Key::A) => top_paddle.move_left(delta),
+                    Event::KeyPress(Key::D) => top_paddle.move_right(delta),
+                    Event::WindowUnfocused => set_keyboard_delay_and_repeat(None, None),
+                    _ => {}
                 },
             }
         }
@@ -305,7 +316,7 @@ fn main() {
                 ball.position = Vector2 { x: 0.0, y: 0.0 };
                 top_paddle.position.x = 0.0;
                 bottom_paddle.position.x = 0.0;
-                
+
                 set_keyboard_delay_and_repeat(None, None);
             }
         }

@@ -8,5 +8,8 @@ rule cvs
     command = glslc -fshader-stage=vertex $in -o $out
     description = Compiling vertex shader $in to $out
 
+build text.frag.spv: cfs $SRC/text.frag.glsl
+build text.vert.spv: cvs $SRC/text.vert.glsl
+
 build triangle.frag.spv: cfs $SRC/triangle.frag.glsl
 build triangle.vert.spv: cvs $SRC/triangle.vert.glsl

@@ -1,10 +1,13 @@
-#[macro_use]
 mod loader;
+mod sprite;
+
+use sprite::Sprite;
 
 use crate::{ffi::vk, math::Vector2};
 use std::{
     ffi::CStr,
-    mem::{size_of, transmute, MaybeUninit},
+    mem::{size_of, MaybeUninit},
+    ops::Deref,
     path::Path,
     ptr::{copy_nonoverlapping, null, null_mut, NonNull},
 };
@@ -12,61 +15,307 @@ use std::{
 pub use loader::InstanceTable;
 use loader::{DeviceTable, Loader};
 
-struct Sprite {
-    position: Vector2,
-    texture_index: usize,
-    width: u32,
-    height: u32,
+const GRAPHICS: usize = 0;
+const PRESENTATION: usize = 1;
+const TRANSFER: usize = 2;
+
+struct Device {
+    queue_family_indices: [u32; 3],
+    queues: Queues,
+    device: *mut vk::Device,
+    destroy_device: vk::DestroyDevice,
 }
 
-impl Sprite {
-    fn generate_vertex_data(&self, extent: vk::Extent2D) -> [f32; 24] {
-        let (width, height) = self.pixels_to_ndc(extent);
+impl Device {
+    fn new(
+        loader: &Loader,
+        table: &InstanceTable,
+        physical_device: *mut vk::PhysicalDevice,
+        surface: *mut vk::SurfaceKHR,
+    ) -> (Self, DeviceTable) {
+        let queue_family_indices = select_queue_family_indices(table, surface, physical_device);
+        let vk_device = create_device(table, physical_device, queue_family_indices);
 
-        let mut data = [0.0; 24];
-        // Bottom-left vertex
-        data[0] = self.position.x - width;
-        data[1] = -self.position.y + height;
-        data[2] = 0.0;
-        data[3] = 1.0;
+        let device_table = loader.load_device_functions(vk_device);
+        let queues = Queues::retrieve(&device_table, vk_device, queue_family_indices);
+        let device = Self {
+            queue_family_indices,
+            queues,
+            device: vk_device,
+            destroy_device: table.destroy_device,
+        };
+        return (device, device_table);
+    }
+}
 
-        // Top-left vertex
-        data[4] = self.position.x - width;
-        data[5] = -self.position.y - height;
-        data[6] = 0.0;
-        data[7] = 0.0;
+impl Deref for Device {
+    type Target = *mut vk::Device;
 
-        // Top-right vertex
-        data[8] = self.position.x + width;
-        data[9] = -self.position.y - height;
-        data[10] = 1.0;
-        data[11] = 0.0;
+    fn deref(&self) -> &Self::Target {
+        &self.device
+    }
+}
 
-        // Bottom-left vertex
-        data[12] = self.position.x - width;
-        data[13] = -self.position.y + height;
-        data[14] = 0.0;
-        data[15] = 1.0;
+impl Drop for Device {
+    fn drop(&mut self) {
+        (self.destroy_device)(self.device, null());
+    }
+}
 
-        // Top-right vertex
-        data[16] = self.position.x + width;
-        data[17] = -self.position.y - height;
-        data[18] = 1.0;
-        data[19] = 0.0;
+struct Instance {
+    destroy_instance: vk::DestroyInstance,
+    instance: *mut vk::Instance,
+}
 
-        // Bottom-right vertex
-        data[20] = self.position.x + width;
-        data[21] = -self.position.y + height;
-        data[22] = 1.0;
-        data[23] = 1.0;
-        return data;
+impl Deref for Instance {
+    type Target = *mut vk::Instance;
+
+    fn deref(&self) -> &Self::Target {
+        &self.instance
+    }
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        (self.destroy_instance)(self.instance, null());
+    }
+}
+
+struct Material {
+    device: *mut vk::Device,
+    descriptor_layout: *mut vk::DescriptorSetLayout,
+    layout: *mut vk::PipelineLayout,
+    pipeline: *mut vk::Pipeline,
+    destroy_descriptor_set_layout: vk::DestroyDescriptorSetLayout,
+    destroy_pipeline_layout: vk::DestroyPipelineLayout,
+    destroy_pipeline: vk::DestroyPipeline,
+}
+
+impl Material {
+    fn sprites(
+        table: &DeviceTable,
+        device: *mut vk::Device,
+        render_pass: *mut vk::RenderPass,
+    ) -> Self {
+        let fragment = ShaderModule::from_path(table, device, "shaders/triangle.frag.spv");
+        let vertex = ShaderModule::from_path(table, device, "shaders/triangle.vert.spv");
+
+        let bindings = [vk::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlagBits::Fragment as u32,
+            immutable_samplers: null(),
+        }];
+        let descriptor_layout = descriptor_set_layout_create(table, device, &bindings);
+        let layout = create_pipeline_layout(table, device, Some(descriptor_layout));
+
+        let vertex_binding_description = vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: 4 * std::mem::size_of::<f32>() as u32,
+            input_rate: vk::VertexInputRate::Vertex,
+        };
+
+        let vertex_attribute_descriptions = [
+            vk::VertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: vk::Format::R32G32SFLOAT,
+                offset: 0,
+            },
+            vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32SFLOAT,
+                offset: 2 * std::mem::size_of::<f32>() as u32,
+            },
+        ];
+        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
+            stype: vk::StructureType::PipelineVertexInputStateCreateInfo,
+            next: null(),
+            flags: 0,
+            vertex_binding_description_count: 1,
+            vertex_binding_descriptions: &vertex_binding_description,
+            vertex_attribute_description_count: vertex_attribute_descriptions.len() as u32,
+            vertex_attribute_descriptions: vertex_attribute_descriptions.as_ptr(),
+        };
+        let pipeline = create_graphics_pipeline(
+            table,
+            device,
+            layout,
+            render_pass,
+            &vertex_input_state,
+            *fragment,
+            *vertex,
+        );
+
+        return Self {
+            device,
+            descriptor_layout,
+            layout,
+            pipeline,
+            destroy_descriptor_set_layout: table.destroy_descriptor_set_layout,
+            destroy_pipeline_layout: table.destroy_pipeline_layout,
+            destroy_pipeline: table.destroy_pipeline,
+        };
     }
 
-    fn pixels_to_ndc(&self, extent: vk::Extent2D) -> (f32, f32) {
-        return (
-            self.width as f32 / extent.width as f32,
-            self.height as f32 / extent.height as f32,
+    fn text(
+        table: &DeviceTable,
+        device: *mut vk::Device,
+        render_pass: *mut vk::RenderPass,
+    ) -> Self {
+        let fragment = ShaderModule::from_path(table, device, "shaders/text.frag.spv");
+        let vertex = ShaderModule::from_path(table, device, "shaders/text.vert.spv");
+
+        let binding = vk::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::CombinedImageSampler,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlagBits::Fragment as u32,
+            immutable_samplers: null(),
+        };
+        let bindings = [binding];
+
+        let descriptor_layout = descriptor_set_layout_create(table, device, &bindings);
+        let colour_and_coordinate = vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlagBits::Fragment as u32,
+            offset: 0,
+            size: 6 * size_of::<f32>() as u32,
+        };
+        let push_constant_ranges = [colour_and_coordinate];
+        let info = vk::PipelineLayoutCreateInfo {
+            stype: vk::StructureType::PipelineLayoutCreateInfo,
+            next: null(),
+            flags: 0,
+            set_layout_count: 1,
+            set_layouts: &descriptor_layout,
+            push_constant_range_count: push_constant_ranges.len() as u32,
+            push_constant_ranges: push_constant_ranges.as_ptr(),
+        };
+        let mut layout = null_mut();
+        (table.create_pipeline_layout)(device, &info, null(), &mut layout);
+
+        let binding_description = vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: 2 * size_of::<f32>() as u32,
+            input_rate: vk::VertexInputRate::Vertex,
+        };
+        let attribute_description = vk::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32SFLOAT,
+            offset: 0,
+        };
+        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
+            stype: vk::StructureType::PipelineVertexInputStateCreateInfo,
+            next: null(),
+            flags: 0,
+            vertex_binding_description_count: 1,
+            vertex_binding_descriptions: &binding_description,
+            vertex_attribute_description_count: 1,
+            vertex_attribute_descriptions: &attribute_description,
+        };
+        let pipeline = create_graphics_pipeline(
+            table,
+            device,
+            layout,
+            render_pass,
+            &vertex_input_state,
+            *fragment,
+            *vertex,
         );
+
+        return Self {
+            device,
+            descriptor_layout,
+            layout,
+            pipeline,
+            destroy_descriptor_set_layout: table.destroy_descriptor_set_layout,
+            destroy_pipeline_layout: table.destroy_pipeline_layout,
+            destroy_pipeline: table.destroy_pipeline,
+        };
+    }
+}
+
+impl Deref for Material {
+    type Target = *mut vk::Pipeline;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pipeline
+    }
+}
+
+impl Drop for Material {
+    fn drop(&mut self) {
+        (self.destroy_descriptor_set_layout)(self.device, self.descriptor_layout, null());
+        (self.destroy_pipeline_layout)(self.device, self.layout, null());
+        (self.destroy_pipeline)(self.device, self.pipeline, null());
+    }
+}
+
+struct ShaderModule {
+    shader_module: *mut vk::ShaderModule,
+    device: *mut vk::Device,
+    destroy_shader_module: vk::DestroyShaderModule,
+}
+
+impl ShaderModule {
+    fn from_path<P>(table: &DeviceTable, device: *mut vk::Device, path: P) -> Self
+    where
+        P: AsRef<Path>,
+    {
+        let file = std::fs::read(path).unwrap();
+        let info = vk::ShaderModuleCreateInfo {
+            stype: vk::StructureType::ShaderModuleCreateInfo,
+            next: null(),
+            flags: 0,
+            code_size: file.len(),
+            code: file.as_ptr() as *const u32,
+        };
+
+        let mut shader_module = null_mut();
+        (table.create_shader_module)(device, &info, null(), &mut shader_module);
+
+        return Self {
+            shader_module,
+            device,
+            destroy_shader_module: table.destroy_shader_module,
+        };
+    }
+}
+
+impl Deref for ShaderModule {
+    type Target = *mut vk::ShaderModule;
+
+    fn deref(&self) -> &Self::Target {
+        &self.shader_module
+    }
+}
+
+impl Drop for ShaderModule {
+    fn drop(&mut self) {
+        (self.destroy_shader_module)(self.device, self.shader_module, null());
+    }
+}
+
+struct SurfaceKHR {
+    instance: *mut vk::Instance,
+    destroy_surface_khr: vk::DestroySurfaceKHR,
+    surface: *mut vk::SurfaceKHR,
+}
+
+impl Deref for SurfaceKHR {
+    type Target = *mut vk::SurfaceKHR;
+
+    fn deref(&self) -> &Self::Target {
+        &self.surface
+    }
+}
+
+impl Drop for SurfaceKHR {
+    fn drop(&mut self) {
+        (self.destroy_surface_khr)(self.instance, self.surface, null())
     }
 }
 
@@ -178,13 +427,14 @@ impl MBI {
         device_table: &DeviceTable,
         physical_device: *mut vk::PhysicalDevice,
         device: *mut vk::Device,
+        format: vk::Format,
         extent: vk::Extent2D,
         tiling: vk::ImageTiling,
         usage: vk::ImageUsageFlags,
         layout: vk::ImageLayout,
         flags: vk::MemoryPropertyFlags,
     ) -> Self {
-        let image = create_image(device_table, device, extent, tiling, usage, layout)
+        let image = create_image(device_table, device, format, extent, tiling, usage, layout)
             .expect("Failed to create image!");
 
         let requirements = {
@@ -254,12 +504,12 @@ impl PresentationSync {
 }
 
 struct RenderTarget {
-    pub extent: vk::Extent2D,
-    pub framebuffers: Box<[*mut vk::Framebuffer]>,
-    pub views: Box<[*mut vk::ImageView]>,
-    pub images: Box<[*mut vk::Image]>,
-    pub render_pass: *mut vk::RenderPass,
-    pub swapchain: *mut vk::SwapchainKHR,
+    extent: vk::Extent2D,
+    framebuffers: Box<[*mut vk::Framebuffer]>,
+    views: Box<[*mut vk::ImageView]>,
+    images: Box<[*mut vk::Image]>,
+    render_pass: *mut vk::RenderPass,
+    swapchain: *mut vk::SwapchainKHR,
 }
 
 impl RenderTarget {
@@ -333,7 +583,7 @@ impl PerFrameResources {
         &mut self,
         device_table: &DeviceTable,
         device: *mut vk::Device,
-        set_layout: NonNull<vk::DescriptorSetLayout>,
+        set_layout: *mut vk::DescriptorSetLayout,
     ) -> usize {
         // We should only have one secondary command buffer executing per descriptor set
         debug_assert_eq!(self.secondaries.len(), self.descriptor_sets.len());
@@ -361,11 +611,12 @@ impl PerFrameResources {
             allocate_command_buffer(table, device, command_pool, vk::CommandBufferLevel::Primary);
         let secondaries = Vec::new();
 
+        let descriptor_count = 4;
         let pool_sizes = [vk::DescriptorPoolSize {
             dtype: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 3,
+            descriptor_count,
         }];
-        let descriptor_pool = descriptor_pool_create(table, device, 3, &pool_sizes);
+        let descriptor_pool = descriptor_pool_create(table, device, descriptor_count, &pool_sizes);
         let descriptor_sets = Vec::new();
 
         let res = Self {
@@ -424,13 +675,18 @@ impl Queues {
         let get_device_queue = device_table.get_device_queue;
 
         let mut graphics = null_mut();
-        get_device_queue(device, queue_family_indices[0], 0, &mut graphics);
+        get_device_queue(device, queue_family_indices[GRAPHICS], 0, &mut graphics);
 
         let mut presentation = null_mut();
-        get_device_queue(device, queue_family_indices[1], 0, &mut presentation);
+        get_device_queue(
+            device,
+            queue_family_indices[PRESENTATION],
+            0,
+            &mut presentation,
+        );
 
         let mut transfer = null_mut();
-        get_device_queue(device, queue_family_indices[2], 0, &mut transfer);
+        get_device_queue(device, queue_family_indices[TRANSFER], 0, &mut transfer);
 
         let queues = Queues {
             graphics,
@@ -443,20 +699,18 @@ impl Queues {
 
 pub struct Renderer {
     frame_resources: Box<[PerFrameResources]>,
-    sprites: Vec<Sprite>,                // Static over renderer lifetime
-    textures: Vec<Texture>,              // Static over renderer's lifetime
-    vertex_buffer: MBB,                  // One vertex buffer for the entire game
-    transfer_pool: *mut vk::CommandPool, // One transfer command pool for loading images
+    sprites: Vec<Sprite>,
+    textures: Vec<Texture>,
+    vertex_buffer: MBB,
+    transfer_pool: *mut vk::CommandPool,
     presentation_sync: PresentationSync,
-    set_layout: NonNull<vk::DescriptorSetLayout>,
-    pipeline: *mut vk::Pipeline,
-    pipeline_layout: *mut vk::PipelineLayout,
-    queues: Queues,
+    material_sprite: Material,
+    material_text: Material,
     render_target: RenderTarget,
-    device: *mut vk::Device,
+    device: Device,
     physical_device: NonNull<vk::PhysicalDevice>,
-    surface: NonNull<vk::SurfaceKHR>,
-    instance: NonNull<vk::Instance>,
+    surface: SurfaceKHR,
+    _instance: Instance,
     device_table: DeviceTable,
     instance_table: InstanceTable,
     _vulkan: crate::ffi::Library,
@@ -471,15 +725,15 @@ impl Renderer {
 
         let index = acquire_image(
             &self.device_table,
-            self.device,
+            *self.device,
             self.render_target.swapchain,
             100_000_000,
             Some(image_acquired),
             None,
         )?;
 
-        fence_wait_reset(&self.device_table, self.device, drawing_finished);
-        resources.reset(&self.device_table, self.device);
+        fence_wait_reset(&self.device_table, *self.device, drawing_finished);
+        resources.reset(&self.device_table, *self.device);
         command_buffer_begin_primary(
             &self.device_table,
             resources.primary,
@@ -514,13 +768,12 @@ impl Renderer {
         );
     }
 
-    pub fn create_sprite<P>(&mut self, path: P, position: Vector2) -> usize
+    pub fn create_sprite_from_path<P>(&mut self, path: P) -> usize
     where
         P: AsRef<Path>,
     {
-        let (texture_index, width, height) = self.load_texture(path);
+        let (texture_index, width, height) = self.load_png_from_path(path);
         let sprite = Sprite {
-            position,
             texture_index,
             width,
             height,
@@ -532,51 +785,34 @@ impl Renderer {
     }
 
     pub fn deinit(mut self) {
-        (self.device_table.device_wait_idle)(self.device);
+        (self.device_table.device_wait_idle)(*self.device);
 
-        self.sprites.drain(..);
+        self.sprites.clear();
         (0..self.textures.len()).for_each(|i| self.unload_texture(i));
 
         for frame_resource in self.frame_resources.iter_mut() {
-            frame_resource.destroy(&self.device_table, self.device);
+            frame_resource.destroy(&self.device_table, *self.device);
         }
 
-        self.vertex_buffer.destroy(&self.device_table, self.device);
+        self.vertex_buffer.destroy(&self.device_table, *self.device);
         self.presentation_sync
-            .destroy(&self.device_table, self.device);
+            .destroy(&self.device_table, *self.device);
 
-        (self.device_table.destroy_command_pool)(self.device, self.transfer_pool, null());
-
-        (self.device_table.destroy_descriptor_set_layout)(
-            self.device,
-            self.set_layout.as_ptr(),
-            null(),
-        );
-        (self.device_table.destroy_pipeline)(self.device, self.pipeline, null());
-        (self.device_table.destroy_pipeline_layout)(self.device, self.pipeline_layout, null());
-        self.render_target.destroy(&self.device_table, self.device);
-
-        (self.instance_table.destroy_device)(self.device, null());
-        (self.instance_table.destroy_surface_khr)(
-            self.instance.as_ptr(),
-            self.surface.as_ptr(),
-            null(),
-        );
-        (self.instance_table.destroy_instance)(self.instance.as_ptr(), null());
+        (self.device_table.destroy_command_pool)(*self.device, self.transfer_pool, null());
+        self.render_target.destroy(&self.device_table, *self.device);
     }
 
     pub fn draw(&mut self, sprite_index: usize, position: Vector2) {
         let current_frame = self.presentation_sync.current_frame;
         let resources = &mut self.frame_resources[current_frame];
 
-        self.sprites[sprite_index].position = position;
         let vertex_data_size = 24 * size_of::<f32>() as vk::DeviceSize;
         let offset = resources.secondaries.len() as vk::DeviceSize * vertex_data_size;
         let vertex_data =
-            self.sprites[sprite_index].generate_vertex_data(self.render_target.extent);
+            self.sprites[sprite_index].generate_vertex_data(position, self.render_target.extent);
         self.vertex_buffer.write_region(
             &self.device_table,
-            self.device,
+            *self.device,
             offset,
             vertex_data_size,
             vertex_data.as_ptr() as _,
@@ -584,8 +820,8 @@ impl Renderer {
 
         let index = resources.allocate_descriptor_and_secondary(
             &self.device_table,
-            self.device,
-            self.set_layout,
+            *self.device,
+            self.material_sprite.descriptor_layout,
         );
         let secondary = resources.secondaries[index];
 
@@ -598,17 +834,17 @@ impl Renderer {
 
         descriptor_set_update_sampled_image(
             &self.device_table,
-            self.device,
+            *self.device,
             resources.descriptor_sets[index],
             &self.textures[self.sprites[sprite_index].texture_index],
         );
 
         set_scissor_and_viewport(&self.device_table, secondary, self.render_target.extent);
-        bind_graphics_pipeline(&self.device_table, secondary, self.pipeline);
+        bind_graphics_pipeline(&self.device_table, secondary, self.material_sprite.pipeline);
         bind_sampled_image_descriptor(
             &self.device_table,
             secondary,
-            self.pipeline_layout,
+            self.material_sprite.layout,
             resources.descriptor_sets[index],
         );
 
@@ -634,7 +870,7 @@ impl Renderer {
         command_buffer_end_and_submit(
             &self.device_table,
             primary,
-            self.queues.graphics,
+            self.device.queues.graphics,
             Some(self.presentation_sync.image_acquired[current_frame]),
             vk::PipelineStageFlagBits::ColorAttachmentOutput as u32,
             Some(self.presentation_sync.image_ready[current_frame]),
@@ -648,26 +884,34 @@ impl Renderer {
 
     pub fn init(window: &crate::Window) -> Self {
         let mut loader = Loader::init();
-        let instance = create_instance(&loader).expect("Failed to create instance!");
 
-        // Initialization
-        let instance_table = loader.load_instance_functions(instance.as_ptr());
-        let physical_device = select_physical_device(&instance_table, instance.as_ptr())
+        // Instance creation and instance function loading
+        let (instance, instance_table) = {
+            let vk_instance = create_instance(&loader).expect("Failed to create instance!");
+            let instance_table = loader.load_instance_functions(vk_instance);
+            let instance = Instance {
+                destroy_instance: instance_table.destroy_instance,
+                instance: vk_instance,
+            };
+            (instance, instance_table)
+        };
+
+        let physical_device = select_physical_device(&instance_table, *instance)
             .expect("Failed to select physical device!");
-        let surface = window
-            .create_surface(&instance_table, instance.as_ptr())
-            .expect("Failed to create VkSurfaceKHR!");
-        let queue_family_indices = select_queue_family_indices(
-            &instance_table,
-            surface.as_ptr(),
-            physical_device.as_ptr(),
-        );
-        let device = create_device(
-            &instance_table,
-            physical_device.as_ptr(),
-            queue_family_indices,
-        );
-        let device_table = loader.load_device_functions(device);
+
+        // Surface creation
+        let surface = {
+            let surface = window
+                .create_surface(&instance_table, *instance)
+                .expect("Failed to create VkSurfaceKHR!");
+            SurfaceKHR {
+                instance: *instance,
+                destroy_surface_khr: instance_table.destroy_surface_khr,
+                surface,
+            }
+        };
+        let (device, device_table) =
+            Device::new(&loader, &instance_table, physical_device.as_ptr(), *surface);
         let _vulkan = loader.take_library();
 
         // Render target
@@ -675,57 +919,43 @@ impl Renderer {
             &device_table,
             &instance_table,
             physical_device.as_ptr(),
-            device,
-            surface.as_ptr(),
+            *device,
+            *surface,
             window.dimensions_inner().into(),
         );
 
-        // Shader modules
-        let fragment = create_shader_module(&device_table, device, "shaders/triangle.frag.spv");
-        let vertex = create_shader_module(&device_table, device, "shaders/triangle.vert.spv");
-
-        let bindings = [vk::DescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlagBits::Fragment as u32,
-            immutable_samplers: null(),
-        }];
-        let set_layout = descriptor_set_layout_create(&device_table, device, &bindings).unwrap();
-
-        let pipeline_layout = create_pipeline_layout(&device_table, device, Some(set_layout));
-        let pipeline = create_graphics_pipeline(
-            &device_table,
-            device,
-            pipeline_layout,
-            render_target.render_pass,
-            fragment,
-            vertex,
-        );
-        (device_table.destroy_shader_module)(device, fragment, null());
-        (device_table.destroy_shader_module)(device, vertex, null());
-
-        // Queues
-        let queues = Queues::retrieve(&device_table, device, queue_family_indices);
+        let material_sprite = Material::sprites(&device_table, *device, render_target.render_pass);
+        let material_text = Material::text(&device_table, *device, render_target.render_pass);
 
         let num_images = render_target.images.len();
         // Synchronization primitives required for presentation
-        let presentation_sync = PresentationSync::create(&device_table, device, num_images);
+        let presentation_sync = PresentationSync::create(&device_table, *device, num_images);
 
         let vertex_buffer = MBB::create(
             &instance_table,
             &device_table,
             physical_device.as_ptr(),
-            device,
+            *device,
             5 * 1024 * 1024,
             vk::BufferUsageFlagBits::VertexBuffer as u32,
             vk::MemoryPropertyFlagBits::HostCoherent as u32
                 | vk::MemoryPropertyFlagBits::HostVisible as u32,
         );
 
-        let transfer_pool = create_command_pool(&device_table, device, 0, queue_family_indices[2]);
+        let transfer_pool = create_command_pool(
+            &device_table,
+            *device,
+            0,
+            device.queue_family_indices[TRANSFER],
+        );
         let frame_resources: Box<[PerFrameResources]> = (0..num_images)
-            .map(|_| PerFrameResources::create(&device_table, device, queue_family_indices[0]))
+            .map(|_| {
+                PerFrameResources::create(
+                    &device_table,
+                    *device,
+                    device.queue_family_indices[GRAPHICS],
+                )
+            })
             .collect();
 
         let renderer = Self {
@@ -734,16 +964,14 @@ impl Renderer {
             textures: Vec::new(),
             vertex_buffer,
             transfer_pool,
-            set_layout,
-            pipeline,
-            pipeline_layout,
-            queues,
+            material_sprite,
+            material_text,
             presentation_sync,
             render_target,
             device,
             physical_device,
             surface,
-            instance,
+            _instance: instance,
             device_table,
             instance_table,
             _vulkan,
@@ -751,24 +979,34 @@ impl Renderer {
         return renderer;
     }
 
-    pub fn load_texture<P>(&mut self, path: P) -> (usize, u32, u32)
+    pub fn load_png_from_path<P>(&mut self, path: P) -> (usize, u32, u32)
     where
         P: AsRef<Path>,
     {
         let (width, height, pixels) = crate::read_png(path);
+        let index = self.load_texture(width, height, &pixels, vk::Format::R8G8B8A8UNORM);
+        return (index, width, height);
+    }
 
+    pub fn load_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+        format: vk::Format,
+    ) -> usize {
         // Prepare staging buffer
         let staging = MBB::create(
             &self.instance_table,
             &self.device_table,
             self.physical_device.as_ptr(),
-            self.device,
+            *self.device,
             4 * (width * height) as vk::DeviceSize,
             vk::BufferUsageFlagBits::TransferSource as u32,
             vk::MemoryPropertyFlagBits::HostCoherent as u32
                 | vk::MemoryPropertyFlagBits::HostVisible as u32,
         );
-        staging.fill(&self.device_table, self.device, pixels.as_ptr());
+        staging.fill(&self.device_table, *self.device, pixels.as_ptr());
 
         // Create texture image and memory
         let image_usage = vk::ImageUsageFlagBits::TransferDestination as u32
@@ -777,7 +1015,8 @@ impl Renderer {
             &self.instance_table,
             &self.device_table,
             self.physical_device.as_ptr(),
-            self.device,
+            *self.device,
+            format,
             (width, height).into(),
             vk::ImageTiling::Optimal,
             image_usage,
@@ -785,19 +1024,14 @@ impl Renderer {
             vk::MemoryPropertyFlagBits::DeviceLocal as u32,
         );
 
-        let view = create_image_view(
-            &self.device_table,
-            self.device,
-            image.as_ptr(),
-            vk::Format::R8G8B8A8UNORM,
-        );
+        let view = create_image_view(&self.device_table, *self.device, image.as_ptr(), format);
         let sampler =
-            create_sampler(&self.device_table, self.device).expect("Failed to create sampler!");
+            create_sampler(&self.device_table, *self.device).expect("Failed to create sampler!");
 
         // Prepare command buffer for recording
         let transfer_buffer = allocate_command_buffer(
             &self.device_table,
-            self.device,
+            *self.device,
             self.transfer_pool,
             vk::CommandBufferLevel::Primary,
         );
@@ -870,26 +1104,26 @@ impl Renderer {
             );
         }
 
-        let fence = create_fence(&self.device_table, self.device, 0);
+        let fence = create_fence(&self.device_table, *self.device, 0);
         command_buffer_end_and_submit(
             &self.device_table,
             transfer_buffer,
-            self.queues.transfer,
+            self.device.queues.transfer,
             None,
             0,
             None,
             Some(fence),
         );
-        fence_wait_reset(&self.device_table, self.device, fence);
+        fence_wait_reset(&self.device_table, *self.device, fence);
 
         (self.device_table.free_command_buffers)(
-            self.device,
+            *self.device,
             self.transfer_pool,
             1,
             &transfer_buffer,
         );
-        staging.destroy(&self.device_table, self.device);
-        fence_destroy(&self.device_table, self.device, fence);
+        staging.destroy(&self.device_table, *self.device);
+        fence_destroy(&self.device_table, *self.device, fence);
 
         let texture = Texture {
             image,
@@ -900,7 +1134,7 @@ impl Renderer {
 
         let index = self.textures.len();
         self.textures.push(texture);
-        return (index, width, height);
+        return index;
     }
 
     pub fn present(&mut self, index: usize) {
@@ -915,7 +1149,7 @@ impl Renderer {
             image_indices: &(index as u32),
             results: null_mut(),
         };
-        (self.device_table.queue_present_khr)(self.queues.presentation, &info);
+        (self.device_table.queue_present_khr)(self.device.queues.presentation, &info);
 
         self.presentation_sync.current_frame += 1;
         if self.presentation_sync.num_images <= self.presentation_sync.current_frame {
@@ -924,24 +1158,24 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, window: &crate::Window) {
-        (self.device_table.device_wait_idle)(self.device);
-        self.render_target.destroy(&self.device_table, self.device);
+        (self.device_table.device_wait_idle)(*self.device);
+        self.render_target.destroy(&self.device_table, *self.device);
         self.render_target = RenderTarget::create(
             &self.device_table,
             &self.instance_table,
             self.physical_device.as_ptr(),
-            self.device,
-            self.surface.as_ptr(),
+            *self.device,
+            *self.surface,
             window.dimensions_inner().into(),
         );
     }
 
     pub fn unload_texture(&mut self, index: usize) {
         let texture = &self.textures[index];
-        (self.device_table.destroy_sampler)(self.device, texture.sampler.as_ptr(), null());
-        (self.device_table.destroy_image_view)(self.device, texture.view, null());
-        (self.device_table.destroy_image)(self.device, texture.image.as_ptr(), null());
-        (self.device_table.free_memory)(self.device, texture.memory.as_ptr(), null());
+        (self.device_table.destroy_sampler)(*self.device, texture.sampler.as_ptr(), null());
+        (self.device_table.destroy_image_view)(*self.device, texture.view, null());
+        (self.device_table.destroy_image)(*self.device, texture.image.as_ptr(), null());
+        (self.device_table.free_memory)(*self.device, texture.memory.as_ptr(), null());
     }
 }
 
@@ -1100,29 +1334,29 @@ fn command_buffer_end_and_submit(
 ) {
     (table.end_command_buffer)(command_buffer);
 
-    let (wait_semaphore_count, wait_semaphores): (u32, *const _) = if let Some(s) = wait_semaphore {
-        (1, &s)
+    let (wait_semaphore_count, wait_semaphore): (u32, *mut _) = if let Some(s) = wait_semaphore {
+        (1, s)
     } else {
-        (0, null())
+        (0, null_mut())
     };
 
-    let (signal_semaphore_count, signal_semaphores): (u32, *const _) =
+    let (signal_semaphore_count, signal_semaphore): (u32, *mut _) =
         if let Some(s) = signal_semaphore {
-            (1, &s)
+            (1, s)
         } else {
-            (0, null())
+            (0, null_mut())
         };
-
+    
     let submit_info = vk::SubmitInfo {
         stype: vk::StructureType::SubmitInfo,
         next: null(),
         wait_semaphore_count,
-        wait_semaphores,
+        wait_semaphores: &wait_semaphore,
         wait_dst_stage_mask: &wait_dst_stage_mask,
         command_buffer_count: 1,
         command_buffers: &command_buffer,
         signal_semaphore_count,
-        signal_semaphores,
+        signal_semaphores: &signal_semaphore,
     };
 
     (table.queue_submit)(queue, 1, &submit_info, fence.unwrap_or(null_mut()));
@@ -1238,6 +1472,7 @@ fn create_graphics_pipeline(
     device: *mut vk::Device,
     layout: *mut vk::PipelineLayout,
     render_pass: *mut vk::RenderPass,
+    vertex_input_state: *const vk::PipelineVertexInputStateCreateInfo,
     fragment: *mut vk::ShaderModule,
     vertex: *mut vk::ShaderModule,
 ) -> *mut vk::Pipeline {
@@ -1262,36 +1497,6 @@ fn create_graphics_pipeline(
         specialization_info: null(),
     };
     let stages = [fragment_stage, vertex_stage];
-
-    let vertex_binding_description = vk::VertexInputBindingDescription {
-        binding: 0,
-        stride: 4 * std::mem::size_of::<f32>() as u32,
-        input_rate: vk::VertexInputRate::Vertex,
-    };
-
-    let vertex_attribute_descriptions = [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32SFLOAT,
-            offset: 0,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32SFLOAT,
-            offset: 2 * std::mem::size_of::<f32>() as u32,
-        },
-    ];
-    let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
-        stype: vk::StructureType::PipelineVertexInputStateCreateInfo,
-        next: null(),
-        flags: 0,
-        vertex_binding_description_count: 1,
-        vertex_binding_descriptions: &vertex_binding_description,
-        vertex_attribute_description_count: vertex_attribute_descriptions.len() as u32,
-        vertex_attribute_descriptions: vertex_attribute_descriptions.as_ptr(),
-    };
 
     let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo {
         stype: vk::StructureType::PipelineInputAssemblyStateCreateInfo,
@@ -1388,7 +1593,7 @@ fn create_graphics_pipeline(
         flags: 0,
         stage_count: stages.len() as u32,
         stages: stages.as_ptr(),
-        vertex_input_state: &vertex_input_state,
+        vertex_input_state,
         input_assembly_state: &input_assembly_state,
         tessellation_state: null(),
         viewport_state: &viewport_state,
@@ -1411,6 +1616,7 @@ fn create_graphics_pipeline(
 fn create_image(
     table: &DeviceTable,
     device: *mut vk::Device,
+    format: vk::Format,
     extent: vk::Extent2D,
     tiling: vk::ImageTiling,
     usage: vk::ImageUsageFlags,
@@ -1426,7 +1632,7 @@ fn create_image(
         next: null(),
         flags: 0,
         image_type: vk::ImageType::TwoDimensional,
-        format: vk::Format::R8G8B8A8UNORM,
+        format,
         extent: (extent.width, extent.height, 1).into(),
         mip_levels: 1,
         array_layers: 1,
@@ -1478,7 +1684,8 @@ fn create_image_view(
     return view;
 }
 
-fn create_instance(loader: &Loader) -> Option<NonNull<vk::Instance>> {
+// TODO: Make this function less sneaky!
+fn create_instance(loader: &Loader) -> Option<*mut vk::Instance> {
     let create_instance = loader.load_vk_create_instance();
     let application_name = "Pong!\0";
     let application_name_c = CStr::from_bytes_with_nul(application_name.as_bytes()).unwrap();
@@ -1520,20 +1727,20 @@ fn create_instance(loader: &Loader) -> Option<NonNull<vk::Instance>> {
 
     let mut instance = null_mut();
     let result = create_instance(&info, null_mut(), &mut instance);
-    if result != vk::Result::Success {
+    if result != vk::Result::Success || instance.is_null() {
         return None;
+    } else {
+        return Some(instance);
     }
-
-    return NonNull::new(instance);
 }
 
 fn create_pipeline_layout(
     table: &DeviceTable,
     device: *mut vk::Device,
-    set_layout: Option<NonNull<vk::DescriptorSetLayout>>,
+    set_layout: Option<*mut vk::DescriptorSetLayout>,
 ) -> *mut vk::PipelineLayout {
     let (set_layout_count, set_layouts): (u32, *const _) = if let Some(l) = set_layout {
-        (1, &l.as_ptr())
+        (1, &l)
     } else {
         (0, null())
     };
@@ -1637,25 +1844,6 @@ fn create_sampler(table: &DeviceTable, device: *mut vk::Device) -> Option<NonNul
     return NonNull::new(sampler);
 }
 
-fn create_shader_module<P: AsRef<std::path::Path>>(
-    table: &DeviceTable,
-    device: *mut vk::Device,
-    path: P,
-) -> *mut vk::ShaderModule {
-    let file = std::fs::read(path).unwrap();
-    let info = vk::ShaderModuleCreateInfo {
-        stype: vk::StructureType::ShaderModuleCreateInfo,
-        next: null(),
-        flags: 0,
-        code_size: file.len(),
-        code: file.as_ptr() as *const u32,
-    };
-
-    let mut shader_module = null_mut();
-    (table.create_shader_module)(device, &info, null(), &mut shader_module);
-    return shader_module;
-}
-
 fn create_semaphore(
     table: &DeviceTable,
     device: *mut vk::Device,
@@ -1735,14 +1923,14 @@ fn descriptor_set_allocate(
     dt: &DeviceTable,
     device: *mut vk::Device,
     pool: *mut vk::DescriptorPool,
-    set_layout: NonNull<vk::DescriptorSetLayout>,
+    set_layout: *mut vk::DescriptorSetLayout,
 ) -> *mut vk::DescriptorSet {
     let info = vk::DescriptorSetAllocateInfo {
         stype: vk::StructureType::DescriptorSetAllocateInfo,
         next: null(),
         descriptor_pool: pool,
         descriptor_set_count: 1,
-        set_layouts: &set_layout.as_ptr(),
+        set_layouts: &set_layout,
     };
     let mut set = null_mut();
     (dt.allocate_descriptor_sets)(device, &info, &mut set);
@@ -1779,7 +1967,7 @@ fn descriptor_set_layout_create(
     table: &DeviceTable,
     device: *mut vk::Device,
     bindings: &[vk::DescriptorSetLayoutBinding],
-) -> Option<NonNull<vk::DescriptorSetLayout>> {
+) -> *mut vk::DescriptorSetLayout {
     let info = vk::DescriptorSetLayoutCreateInfo {
         stype: vk::StructureType::DescriptorSetLayoutCreateInfo,
         next: null(),
@@ -1790,7 +1978,7 @@ fn descriptor_set_layout_create(
 
     let mut set_layout = null_mut();
     (table.create_descriptor_set_layout)(device, &info, null(), &mut set_layout);
-    return NonNull::new(set_layout);
+    return set_layout;
 }
 
 fn get_swapchain_images(
@@ -1821,12 +2009,11 @@ fn find_memory_type(
     memory_type_bits: u32,
     flags: vk::MemoryPropertyFlags,
 ) -> Option<u32> {
-    let mut properties = MaybeUninit::uninit();
+    let mut properties: vk::PhysicalDeviceMemoryProperties = unsafe { std::mem::zeroed() };
     (instance_table.get_physical_device_memory_properties)(
         physical_device,
-        properties.as_mut_ptr(),
+        &mut properties,
     );
-    let properties = unsafe { properties.assume_init() };
 
     for i in 0..properties.memory_type_count {
         if (memory_type_bits & (1u32 << i)) == (1u32 << i) {
@@ -1888,15 +2075,14 @@ fn get_queue_family_properties(
 ) -> Box<[vk::QueueFamilyProperties]> {
     let mut count = 0;
     (table.get_physical_device_queue_family_properties)(physical_device, &mut count, null_mut());
-    let mut properties: Box<[MaybeUninit<vk::QueueFamilyProperties>]> =
-        vec![MaybeUninit::uninit(); count as usize].into_boxed_slice();
+    let mut properties = vec![unsafe { std::mem::zeroed() }; count as usize].into_boxed_slice();
     (table.get_physical_device_queue_family_properties)(
         physical_device,
         &mut count,
-        properties.as_mut_ptr() as *mut _,
+        properties.as_mut_ptr(),
     );
 
-    return unsafe { transmute(properties) };
+    return properties;
 }
 
 fn get_swapchain_format(

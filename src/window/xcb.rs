@@ -5,7 +5,7 @@ use crate::{
 };
 use std::{
     ffi::{c_void, CStr},
-    ptr::{null, null_mut, NonNull},
+    ptr::{null, null_mut},
 };
 
 fn register_for_wm_delete(connection: *mut xcb::Connection, window_id: u32) -> Option<u32> {
@@ -63,7 +63,7 @@ impl Window {
         &self,
         table: &InstanceTable,
         instance: *mut vk::Instance,
-    ) -> Option<NonNull<vk::SurfaceKHR>> {
+    ) -> Option<*mut vk::SurfaceKHR> {
         let info = vk::XcbSurfaceCreateInfoKHR {
             stype: vk::StructureType::XCBSurfaceCreateInfoKHR,
             next: null(),
@@ -73,11 +73,11 @@ impl Window {
         };
         let mut surface = null_mut();
         let result = (table.create_xcb_surface_khr)(instance, &info, null(), &mut surface);
-        if result != vk::Result::Success {
+        if result != vk::Result::Success || surface.is_null() {
             return None;
         }
 
-        return NonNull::new(surface);
+        return Some(surface);
     }
 
     pub fn dimensions_inner(&self) -> (u32, u32) {
