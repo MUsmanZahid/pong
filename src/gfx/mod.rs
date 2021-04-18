@@ -1,6 +1,9 @@
 mod loader;
+mod material;
+mod scene;
 mod sprite;
 
+use material::Material;
 use sprite::Sprite;
 
 use crate::{ffi::vk, math::Vector2};
@@ -78,179 +81,6 @@ impl Deref for Instance {
 impl Drop for Instance {
     fn drop(&mut self) {
         (self.destroy_instance)(self.instance, null());
-    }
-}
-
-struct Material {
-    device: *mut vk::Device,
-    descriptor_layout: *mut vk::DescriptorSetLayout,
-    layout: *mut vk::PipelineLayout,
-    pipeline: *mut vk::Pipeline,
-    destroy_descriptor_set_layout: vk::DestroyDescriptorSetLayout,
-    destroy_pipeline_layout: vk::DestroyPipelineLayout,
-    destroy_pipeline: vk::DestroyPipeline,
-}
-
-impl Material {
-    fn sprites(
-        table: &DeviceTable,
-        device: *mut vk::Device,
-        render_pass: *mut vk::RenderPass,
-    ) -> Self {
-        let fragment = ShaderModule::from_path(table, device, "shaders/triangle.frag.spv");
-        let vertex = ShaderModule::from_path(table, device, "shaders/triangle.vert.spv");
-
-        let bindings = [vk::DescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlagBits::Fragment as u32,
-            immutable_samplers: null(),
-        }];
-        let descriptor_layout = descriptor_set_layout_create(table, device, &bindings);
-        let layout = create_pipeline_layout(table, device, Some(descriptor_layout));
-
-        let vertex_binding_description = vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: 4 * std::mem::size_of::<f32>() as u32,
-            input_rate: vk::VertexInputRate::Vertex,
-        };
-
-        let vertex_attribute_descriptions = [
-            vk::VertexInputAttributeDescription {
-                location: 0,
-                binding: 0,
-                format: vk::Format::R32G32SFLOAT,
-                offset: 0,
-            },
-            vk::VertexInputAttributeDescription {
-                location: 1,
-                binding: 0,
-                format: vk::Format::R32G32SFLOAT,
-                offset: 2 * std::mem::size_of::<f32>() as u32,
-            },
-        ];
-        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
-            stype: vk::StructureType::PipelineVertexInputStateCreateInfo,
-            next: null(),
-            flags: 0,
-            vertex_binding_description_count: 1,
-            vertex_binding_descriptions: &vertex_binding_description,
-            vertex_attribute_description_count: vertex_attribute_descriptions.len() as u32,
-            vertex_attribute_descriptions: vertex_attribute_descriptions.as_ptr(),
-        };
-        let pipeline = create_graphics_pipeline(
-            table,
-            device,
-            layout,
-            render_pass,
-            &vertex_input_state,
-            *fragment,
-            *vertex,
-        );
-
-        return Self {
-            device,
-            descriptor_layout,
-            layout,
-            pipeline,
-            destroy_descriptor_set_layout: table.destroy_descriptor_set_layout,
-            destroy_pipeline_layout: table.destroy_pipeline_layout,
-            destroy_pipeline: table.destroy_pipeline,
-        };
-    }
-
-    fn text(
-        table: &DeviceTable,
-        device: *mut vk::Device,
-        render_pass: *mut vk::RenderPass,
-    ) -> Self {
-        let fragment = ShaderModule::from_path(table, device, "shaders/text.frag.spv");
-        let vertex = ShaderModule::from_path(table, device, "shaders/text.vert.spv");
-
-        let binding = vk::DescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: vk::DescriptorType::CombinedImageSampler,
-            descriptor_count: 1,
-            stage_flags: vk::ShaderStageFlagBits::Fragment as u32,
-            immutable_samplers: null(),
-        };
-        let bindings = [binding];
-
-        let descriptor_layout = descriptor_set_layout_create(table, device, &bindings);
-        let colour_and_coordinate = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlagBits::Fragment as u32,
-            offset: 0,
-            size: 6 * size_of::<f32>() as u32,
-        };
-        let push_constant_ranges = [colour_and_coordinate];
-        let info = vk::PipelineLayoutCreateInfo {
-            stype: vk::StructureType::PipelineLayoutCreateInfo,
-            next: null(),
-            flags: 0,
-            set_layout_count: 1,
-            set_layouts: &descriptor_layout,
-            push_constant_range_count: push_constant_ranges.len() as u32,
-            push_constant_ranges: push_constant_ranges.as_ptr(),
-        };
-        let mut layout = null_mut();
-        (table.create_pipeline_layout)(device, &info, null(), &mut layout);
-
-        let binding_description = vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: 2 * size_of::<f32>() as u32,
-            input_rate: vk::VertexInputRate::Vertex,
-        };
-        let attribute_description = vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32SFLOAT,
-            offset: 0,
-        };
-        let vertex_input_state = vk::PipelineVertexInputStateCreateInfo {
-            stype: vk::StructureType::PipelineVertexInputStateCreateInfo,
-            next: null(),
-            flags: 0,
-            vertex_binding_description_count: 1,
-            vertex_binding_descriptions: &binding_description,
-            vertex_attribute_description_count: 1,
-            vertex_attribute_descriptions: &attribute_description,
-        };
-        let pipeline = create_graphics_pipeline(
-            table,
-            device,
-            layout,
-            render_pass,
-            &vertex_input_state,
-            *fragment,
-            *vertex,
-        );
-
-        return Self {
-            device,
-            descriptor_layout,
-            layout,
-            pipeline,
-            destroy_descriptor_set_layout: table.destroy_descriptor_set_layout,
-            destroy_pipeline_layout: table.destroy_pipeline_layout,
-            destroy_pipeline: table.destroy_pipeline,
-        };
-    }
-}
-
-impl Deref for Material {
-    type Target = *mut vk::Pipeline;
-
-    fn deref(&self) -> &Self::Target {
-        &self.pipeline
-    }
-}
-
-impl Drop for Material {
-    fn drop(&mut self) {
-        (self.destroy_descriptor_set_layout)(self.device, self.descriptor_layout, null());
-        (self.destroy_pipeline_layout)(self.device, self.layout, null());
-        (self.destroy_pipeline)(self.device, self.pipeline, null());
     }
 }
 
@@ -705,7 +535,6 @@ pub struct Renderer {
     transfer_pool: *mut vk::CommandPool,
     presentation_sync: PresentationSync,
     material_sprite: Material,
-    material_text: Material,
     render_target: RenderTarget,
     device: Device,
     physical_device: NonNull<vk::PhysicalDevice>,
@@ -802,6 +631,9 @@ impl Renderer {
         self.render_target.destroy(&self.device_table, *self.device);
     }
 
+    // TODO: Here we assume that all vertex data is 24 floats long, meaning we cannot intersperse
+    // any draw calls with vertex data that is not 24 floats long; i.e. calling draw text between
+    // draw calls will result in an incorrect offset into the vertex buffer.
     pub fn draw(&mut self, sprite_index: usize, position: Vector2) {
         let current_frame = self.presentation_sync.current_frame;
         let resources = &mut self.frame_resources[current_frame];
@@ -821,7 +653,7 @@ impl Renderer {
         let index = resources.allocate_descriptor_and_secondary(
             &self.device_table,
             *self.device,
-            self.material_sprite.descriptor_layout,
+            self.material_sprite.set_layout,
         );
         let secondary = resources.secondaries[index];
 
@@ -844,7 +676,7 @@ impl Renderer {
         bind_sampled_image_descriptor(
             &self.device_table,
             secondary,
-            self.material_sprite.layout,
+            self.material_sprite.pipeline_layout,
             resources.descriptor_sets[index],
         );
 
@@ -924,9 +756,8 @@ impl Renderer {
             window.dimensions_inner().into(),
         );
 
-        let material_sprite = Material::sprites(&device_table, *device, render_target.render_pass);
-        let material_text = Material::text(&device_table, *device, render_target.render_pass);
-
+        let material_sprite =
+            Material::sprite(&device_table, *device, render_target.render_pass).unwrap();
         let num_images = render_target.images.len();
         // Synchronization primitives required for presentation
         let presentation_sync = PresentationSync::create(&device_table, *device, num_images);
@@ -965,7 +796,6 @@ impl Renderer {
             vertex_buffer,
             transfer_pool,
             material_sprite,
-            material_text,
             presentation_sync,
             render_target,
             device,
@@ -984,7 +814,13 @@ impl Renderer {
         P: AsRef<Path>,
     {
         let (width, height, pixels) = crate::read_png(path);
-        let index = self.load_texture(width, height, &pixels, vk::Format::R8G8B8A8UNORM);
+        let index = self.load_texture(
+            width,
+            height,
+            (4 * width * height) as vk::DeviceSize,
+            &pixels,
+            vk::Format::R8G8B8A8UNORM,
+        );
         return (index, width, height);
     }
 
@@ -992,6 +828,7 @@ impl Renderer {
         &mut self,
         width: u32,
         height: u32,
+        size: vk::DeviceSize,
         pixels: &[u8],
         format: vk::Format,
     ) -> usize {
@@ -1001,7 +838,7 @@ impl Renderer {
             &self.device_table,
             self.physical_device.as_ptr(),
             *self.device,
-            4 * (width * height) as vk::DeviceSize,
+            size,
             vk::BufferUsageFlagBits::TransferSource as u32,
             vk::MemoryPropertyFlagBits::HostCoherent as u32
                 | vk::MemoryPropertyFlagBits::HostVisible as u32,
@@ -1346,7 +1183,7 @@ fn command_buffer_end_and_submit(
         } else {
             (0, null_mut())
         };
-    
+
     let submit_info = vk::SubmitInfo {
         stype: vk::StructureType::SubmitInfo,
         next: null(),
@@ -1465,152 +1302,6 @@ fn create_framebuffer(
     let mut framebuffer = null_mut();
     (table.create_framebuffer)(device, &info, null(), &mut framebuffer);
     return framebuffer;
-}
-
-fn create_graphics_pipeline(
-    table: &DeviceTable,
-    device: *mut vk::Device,
-    layout: *mut vk::PipelineLayout,
-    render_pass: *mut vk::RenderPass,
-    vertex_input_state: *const vk::PipelineVertexInputStateCreateInfo,
-    fragment: *mut vk::ShaderModule,
-    vertex: *mut vk::ShaderModule,
-) -> *mut vk::Pipeline {
-    let name = "main\0";
-    let cname = CStr::from_bytes_with_nul(name.as_bytes()).unwrap();
-    let fragment_stage = vk::PipelineShaderStageCreateInfo {
-        stype: vk::StructureType::PipelineShaderStageCreateInfo,
-        next: null(),
-        flags: 0,
-        stage: vk::ShaderStageFlagBits::Fragment,
-        module: fragment,
-        name: cname.as_ptr(),
-        specialization_info: null(),
-    };
-    let vertex_stage = vk::PipelineShaderStageCreateInfo {
-        stype: vk::StructureType::PipelineShaderStageCreateInfo,
-        next: null(),
-        flags: 0,
-        stage: vk::ShaderStageFlagBits::Vertex,
-        module: vertex,
-        name: cname.as_ptr(),
-        specialization_info: null(),
-    };
-    let stages = [fragment_stage, vertex_stage];
-
-    let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo {
-        stype: vk::StructureType::PipelineInputAssemblyStateCreateInfo,
-        next: null(),
-        flags: 0,
-        topology: vk::PrimitiveTopology::TriangleList,
-        primitive_restart_enabled: false as u32,
-    };
-
-    let viewport_state = vk::PipelineViewportStateCreateInfo {
-        stype: vk::StructureType::PipelineViewportStateCreateInfo,
-        next: null(),
-        flags: 0,
-        viewport_count: 1,
-        viewports: &vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: 0.0,
-            height: 0.0,
-            min_depth: 0.0,
-            max_depth: 0.0,
-        },
-        scissor_count: 1,
-        scissors: &vk::Rect2D {
-            offset: (0, 0).into(),
-            extent: (0, 0).into(),
-        },
-    };
-
-    let rasterization_state = vk::PipelineRasterizationStateCreateInfo {
-        stype: vk::StructureType::PipelineRasterizationStateCreateInfo,
-        next: null(),
-        flags: 0,
-        depth_clamp_enable: false as u32,
-        rasterizer_discard_enable: false as u32,
-        polygon_mode: vk::PolygonMode::Fill,
-        cull_mode: vk::CullModeBits::Back as u32,
-        front_face: vk::FrontFace::Clockwise,
-        depth_bias_enable: false as u32,
-        depth_bias_constant_factor: 0.0,
-        depth_bias_clamp: 0.0,
-        depth_bias_slope_factor: 0.0,
-        line_width: 1.0,
-    };
-
-    let multisample_state = vk::PipelineMultisampleStateCreateInfo {
-        stype: vk::StructureType::PipelineMultisampleStateCreateInfo,
-        next: null(),
-        flags: 0,
-        rasterization_samples: vk::SampleCountFlagBits::One,
-        sample_shading_enabled: false as u32,
-        min_sample_shading: 0.0,
-        sample_mask: null(),
-        alpha_to_coverage_enable: false as u32,
-        alpha_to_one_enable: false as u32,
-    };
-
-    let attachment_state = vk::PipelineColorBlendAttachmentState {
-        blend_enable: true as u32,
-        src_color_blend_factor: vk::BlendFactor::SourceColor,
-        dst_color_blend_factor: vk::BlendFactor::OneMinusSourceColor,
-        color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::SourceAlpha,
-        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSourceAlpha,
-        alpha_blend_op: vk::BlendOp::Add,
-        color_write_mask: vk::ColorComponentFlagBits::R as u32
-            | vk::ColorComponentFlagBits::G as u32
-            | vk::ColorComponentFlagBits::B as u32
-            | vk::ColorComponentFlagBits::A as u32,
-    };
-    let color_blend_state = vk::PipelineColorBlendStateCreateInfo {
-        stype: vk::StructureType::PipelineColorBlendStateCreateInfo,
-        next: null(),
-        flags: 0,
-        logic_op_enable: false as u32,
-        logic_op: vk::LogicOp::NoOp,
-        attachment_count: 1,
-        attachments: &attachment_state,
-        blend_constants: [0.0, 0.0, 0.0, 0.0],
-    };
-
-    let dynamic_states = [vk::DynamicState::Scissor, vk::DynamicState::Viewport];
-    let dynamic_state = vk::PipelineDynamicStateCreateInfo {
-        stype: vk::StructureType::PipelineDynamicStateCreateInfo,
-        next: null(),
-        flags: 0,
-        dynamic_state_count: dynamic_states.len() as u32,
-        dynamic_states: dynamic_states.as_ptr(),
-    };
-
-    let info = vk::GraphicsPipelineCreateInfo {
-        stype: vk::StructureType::GraphicsPipelineCreateInfo,
-        next: null(),
-        flags: 0,
-        stage_count: stages.len() as u32,
-        stages: stages.as_ptr(),
-        vertex_input_state,
-        input_assembly_state: &input_assembly_state,
-        tessellation_state: null(),
-        viewport_state: &viewport_state,
-        rasterization_state: &rasterization_state,
-        multisample_state: &multisample_state,
-        depth_stencil_state: null(),
-        color_blend_state: &color_blend_state,
-        dynamic_state: &dynamic_state,
-        layout,
-        render_pass,
-        subpass: 0,
-        base_pipeline_handle: null_mut(),
-        base_pipeline_index: -1,
-    };
-    let mut pipeline = null_mut();
-    (table.create_graphics_pipelines)(device, null_mut(), 1, &info, null(), &mut pipeline);
-    return pipeline;
 }
 
 fn create_image(
@@ -1732,32 +1423,6 @@ fn create_instance(loader: &Loader) -> Option<*mut vk::Instance> {
     } else {
         return Some(instance);
     }
-}
-
-fn create_pipeline_layout(
-    table: &DeviceTable,
-    device: *mut vk::Device,
-    set_layout: Option<*mut vk::DescriptorSetLayout>,
-) -> *mut vk::PipelineLayout {
-    let (set_layout_count, set_layouts): (u32, *const _) = if let Some(l) = set_layout {
-        (1, &l)
-    } else {
-        (0, null())
-    };
-
-    let info = vk::PipelineLayoutCreateInfo {
-        stype: vk::StructureType::PipelineLayoutCreateInfo,
-        next: null(),
-        flags: 0,
-        set_layout_count,
-        set_layouts,
-        push_constant_range_count: 0,
-        push_constant_ranges: null(),
-    };
-
-    let mut layout = null_mut();
-    (table.create_pipeline_layout)(device, &info, null(), &mut layout);
-    return layout;
 }
 
 fn create_render_pass(
@@ -1963,24 +1628,6 @@ fn descriptor_set_update_sampled_image(
     (device_table.update_descriptor_sets)(device, 1, &write, 0, null());
 }
 
-fn descriptor_set_layout_create(
-    table: &DeviceTable,
-    device: *mut vk::Device,
-    bindings: &[vk::DescriptorSetLayoutBinding],
-) -> *mut vk::DescriptorSetLayout {
-    let info = vk::DescriptorSetLayoutCreateInfo {
-        stype: vk::StructureType::DescriptorSetLayoutCreateInfo,
-        next: null(),
-        flags: 0,
-        binding_count: bindings.len() as u32,
-        bindings: bindings.as_ptr(),
-    };
-
-    let mut set_layout = null_mut();
-    (table.create_descriptor_set_layout)(device, &info, null(), &mut set_layout);
-    return set_layout;
-}
-
 fn get_swapchain_images(
     table: &DeviceTable,
     device: *mut vk::Device,
@@ -2010,10 +1657,7 @@ fn find_memory_type(
     flags: vk::MemoryPropertyFlags,
 ) -> Option<u32> {
     let mut properties: vk::PhysicalDeviceMemoryProperties = unsafe { std::mem::zeroed() };
-    (instance_table.get_physical_device_memory_properties)(
-        physical_device,
-        &mut properties,
-    );
+    (instance_table.get_physical_device_memory_properties)(physical_device, &mut properties);
 
     for i in 0..properties.memory_type_count {
         if (memory_type_bits & (1u32 << i)) == (1u32 << i) {

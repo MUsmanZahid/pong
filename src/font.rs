@@ -5,7 +5,7 @@ use freetype::freetype::{
     FT_New_Face, FT_Render_Glyph, FT_Set_Char_Size,
 };
 
-const NUM_ASCII_GLYPHS: usize = 95;
+pub(crate) const NUM_ASCII_GLYPHS: usize = 95;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CoverageMap {
@@ -73,7 +73,6 @@ pub(crate) fn generate_bitmap(
 
 impl CoverageMap {
     fn draw_glyph(&mut self, glyph: &Glyph, data: *mut u8) {
-        let last_index = (self.width * self.height) as usize;
         let mut offset;
         for i in 0..glyph.height {
             for j in 0..glyph.width {
@@ -115,14 +114,15 @@ impl CoverageMap {
     fn new(width: u32, height: u32) -> Self {
         let data = vec![0; (width * height) as usize].into_boxed_slice();
 
-        let canvas = Self {
+        let map = Self {
             data,
             width,
             height,
         };
-        return canvas;
+        return map;
     }
 
+    #[cfg(debug_assertions)]
     pub fn print_pgm(&self) {
         println!("P2\n{} {}\n255", self.width, self.height);
         (0..self.height).for_each(|i| {

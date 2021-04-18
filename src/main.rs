@@ -1,6 +1,13 @@
 //! We only support 64-bit architectures
 #![cfg(target_pointer_width = "64")]
 
+macro_rules! cstr {
+    ( $s:literal ) => {{
+        let s = concat!($s, "\0");
+        std::ffi::CStr::from_bytes_with_nul(s.as_bytes()).unwrap()
+    }};
+}
+
 mod input {
     #![allow(dead_code)]
     #[derive(Copy, Clone, Eq, PartialEq)]
@@ -243,17 +250,8 @@ enum GameState {
     SetActive,
 }
 
-macro_rules! cstr {
-    ( $s:literal ) => {{
-        let s = concat!($s, "\0");
-        std::ffi::CStr::from_bytes_with_nul(s.as_bytes()).unwrap()
-    }};
-}
-
 fn main() {
-    let font_path = cstr!("/usr/share/fonts/TTF/Comfortaa-Light.ttf");
-    let (_glyphs, _coverage) = font::generate_bitmap(font_path, 64);
-
+    let _font_path = cstr!("/usr/share/fonts/TTF/Comfortaa-Light.ttf");
     let mut window = Window::new("Pong!", "rose", 800, 600);
     let mut renderer = Renderer::init(&window);
 
