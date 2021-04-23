@@ -4,12 +4,16 @@ mod scene;
 mod sprite;
 
 use material::Material;
+use scene::Scene;
 use sprite::Sprite;
 
-use crate::{ffi::vk, math::Vector2};
+use crate::{
+    ffi::vk,
+    math::Vector2,
+};
 use std::{
     ffi::CStr,
-    mem::{size_of, MaybeUninit},
+    mem::MaybeUninit,
     ops::Deref,
     path::Path,
     ptr::{copy_nonoverlapping, null, null_mut, NonNull},
@@ -409,30 +413,41 @@ struct PerFrameResources {
 }
 
 impl PerFrameResources {
-    fn allocate_descriptor_and_secondary(
+    fn allocate_descriptors_and_secondaries(
         &mut self,
         device_table: &DeviceTable,
         device: *mut vk::Device,
         set_layout: *mut vk::DescriptorSetLayout,
-    ) -> usize {
-        // We should only have one secondary command buffer executing per descriptor set
+        count: usize,
+    ) -> Box<[usize]> {
+        if count == 0 {
+            return Box::new([]);
+        }
+        
         debug_assert_eq!(self.secondaries.len(), self.descriptor_sets.len());
 
-        // Add a secondary command buffer
-        let secondary = allocate_command_buffer(
+        let offset = self.secondaries.len();
+
+        let secondaries = allocate_command_buffers(
             device_table,
             device,
             self.command_pool,
             vk::CommandBufferLevel::Secondary,
-        );
-        self.secondaries.push(secondary);
+            count,
+        )
+        .expect("Failed to allocate secondary command buffers!");
+        let descriptor_sets = allocate_descriptor_sets(
+            device_table,
+            device,
+            self.descriptor_pool,
+            set_layout,
+            count,
+        )
+        .expect("Failed to allocate descriptor sets!");
 
-        // Add a descriptor set
-        let descriptor_set =
-            descriptor_set_allocate(device_table, device, self.descriptor_pool, set_layout);
-        self.descriptor_sets.push(descriptor_set);
-
-        return self.secondaries.len() - 1;
+        self.secondaries.extend_from_slice(&secondaries);
+        self.descriptor_sets.extend_from_slice(&descriptor_sets);
+        return (offset..self.secondaries.len()).collect();
     }
 
     fn create(table: &DeviceTable, device: *mut vk::Device, graphics_family_index: u32) -> Self {
@@ -478,6 +493,8 @@ impl PerFrameResources {
         );
         self.secondaries.clear();
 
+        // Resetting the descriptor pool returns all descriptor sets back to the pool, unlike
+        // resetting a command pool!
         (table.reset_descriptor_pool)(device, self.descriptor_pool, null());
         self.descriptor_sets.clear();
     }
@@ -529,12 +546,14 @@ impl Queues {
 
 pub struct Renderer {
     frame_resources: Box<[PerFrameResources]>,
+    scene: Scene,
     sprites: Vec<Sprite>,
     textures: Vec<Texture>,
     vertex_buffer: MBB,
     transfer_pool: *mut vk::CommandPool,
     presentation_sync: PresentationSync,
     material_sprite: Material,
+    material_text: Material,
     render_target: RenderTarget,
     device: Device,
     physical_device: NonNull<vk::PhysicalDevice>,
@@ -546,7 +565,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn begin_scene(&mut self, r: f32, g: f32, b: f32) -> Option<usize> {
+    pub(crate) fn begin_scene(&mut self, r: f32, g: f32, b: f32) -> Option<usize> {
         let current_frame = self.presentation_sync.current_frame;
         let resources = &mut self.frame_resources[current_frame];
         let image_acquired = self.presentation_sync.image_acquired[current_frame];
@@ -569,11 +588,12 @@ impl Renderer {
             vk::CommandBufferUsageFlagBits::OneTimeSubmit as u32,
         );
 
+        self.scene = Scene::default();
         self.clear(index, r, g, b);
         return Some(index as usize);
     }
 
-    pub fn clear(&self, index: u32, r: f32, g: f32, b: f32) {
+    pub(crate) fn clear(&self, index: u32, r: f32, g: f32, b: f32) {
         let info = vk::RenderPassBeginInfo {
             stype: vk::StructureType::RenderPassBeginInfo,
             next: null(),
@@ -597,7 +617,7 @@ impl Renderer {
         );
     }
 
-    pub fn create_sprite_from_path<P>(&mut self, path: P) -> usize
+    pub(crate) fn create_sprite_from_path<P>(&mut self, path: P) -> usize
     where
         P: AsRef<Path>,
     {
@@ -613,7 +633,7 @@ impl Renderer {
         return index;
     }
 
-    pub fn deinit(mut self) {
+    pub(crate) fn deinit(mut self) {
         (self.device_table.device_wait_idle)(*self.device);
 
         self.sprites.clear();
@@ -631,74 +651,127 @@ impl Renderer {
         self.render_target.destroy(&self.device_table, *self.device);
     }
 
-    // TODO: Here we assume that all vertex data is 24 floats long, meaning we cannot intersperse
-    // any draw calls with vertex data that is not 24 floats long; i.e. calling draw text between
-    // draw calls will result in an incorrect offset into the vertex buffer.
-    pub fn draw(&mut self, sprite_index: usize, position: Vector2) {
-        let current_frame = self.presentation_sync.current_frame;
-        let resources = &mut self.frame_resources[current_frame];
-
-        let vertex_data_size = 24 * size_of::<f32>() as vk::DeviceSize;
-        let offset = resources.secondaries.len() as vk::DeviceSize * vertex_data_size;
+    pub(crate) fn draw(&mut self, sprite_index: usize, position: Vector2) {
         let vertex_data =
             self.sprites[sprite_index].generate_vertex_data(position, self.render_target.extent);
+        self.scene.insert_sprite(&vertex_data, sprite_index);
+    }
+
+    pub(crate) fn end_scene(&mut self) {
+        let current_frame = self.presentation_sync.current_frame;
+        let resources = &mut self.frame_resources[current_frame];
+        let primary = resources.primary;
+
+        // Write the data into the vertex buffer
         self.vertex_buffer.write_region(
             &self.device_table,
             *self.device,
-            offset,
-            vertex_data_size,
-            vertex_data.as_ptr() as _,
+            0,
+            self.scene.data.len() as vk::DeviceSize,
+            self.scene.data.as_ptr(),
         );
 
-        let index = resources.allocate_descriptor_and_secondary(
+        // Allocate secondary command buffers and a corresponding descriptor set for each
+        let count = self.scene.sprite.len();
+        let indices = resources.allocate_descriptors_and_secondaries(
             &self.device_table,
             *self.device,
             self.material_sprite.set_layout,
-        );
-        let secondary = resources.secondaries[index];
-
-        command_buffer_begin_secondary(
-            &self.device_table,
-            secondary,
-            self.render_target.render_pass,
-            vk::CommandBufferUsageFlagBits::OneTimeSubmit as u32,
+            count,
         );
 
-        descriptor_set_update_sampled_image(
+        // Record all sprite commands
+        let sids = self.scene.sprite.iter();
+        let idxs = indices.iter();
+
+        // Update the descriptor set and record the command buffer
+        for (sid, &idx) in sids.zip(idxs) {
+            descriptor_set_update_sampled_image(
+                &self.device_table,
+                *self.device,
+                resources.descriptor_sets[idx],
+                &self.textures[self.sprites[sid.index].texture_index],
+            );
+
+            let secondary = resources.secondaries[idx];
+            command_buffer_begin_secondary(
+                &self.device_table,
+                secondary,
+                self.render_target.render_pass,
+                vk::CommandBufferUsageFlagBits::OneTimeSubmit as u32,
+            );
+            set_scissor_and_viewport(&self.device_table, secondary, self.render_target.extent);
+            bind_graphics_pipeline(&self.device_table, secondary, self.material_sprite.pipeline);
+            bind_sampled_image_descriptor(
+                &self.device_table,
+                secondary,
+                self.material_sprite.pipeline_layout,
+                resources.descriptor_sets[idx],
+            );
+            bind_vertex_buffer(
+                &self.device_table,
+                secondary,
+                &self.vertex_buffer,
+                sid.offset as vk::DeviceSize,
+            );
+            (self.device_table.cmd_draw)(secondary, 6, 1, 0, 0);
+            (self.device_table.end_command_buffer)(secondary);
+        }
+
+        // Recording glyph draw
+        let glyph_indices = resources.allocate_descriptors_and_secondaries(
             &self.device_table,
             *self.device,
-            resources.descriptor_sets[index],
-            &self.textures[self.sprites[sprite_index].texture_index],
+            self.material_text.set_layout,
+            self.scene.glyphs.len(),
         );
 
-        set_scissor_and_viewport(&self.device_table, secondary, self.render_target.extent);
-        bind_graphics_pipeline(&self.device_table, secondary, self.material_sprite.pipeline);
-        bind_sampled_image_descriptor(
-            &self.device_table,
-            secondary,
-            self.material_sprite.pipeline_layout,
-            resources.descriptor_sets[index],
-        );
+        let gids = self.scene.glyphs.iter();
+        let idxs = glyph_indices.iter();
+        for (gid, &idx) in gids.zip(idxs) {
+            descriptor_set_update_sampled_image(
+                &self.device_table,
+                *self.device,
+                resources.descriptor_sets[idx],
+                &self.textures[gid.texture_index],
+            );
 
-        bind_vertex_buffer(&self.device_table, secondary, &self.vertex_buffer, offset);
-        (self.device_table.cmd_draw)(secondary, 6, 1, 0, 0);
-        (self.device_table.end_command_buffer)(secondary);
-    }
+            let secondary = resources.secondaries[idx];
+            command_buffer_begin_secondary(
+                &self.device_table,
+                secondary,
+                self.render_target.render_pass,
+                vk::CommandBufferUsageFlagBits::OneTimeSubmit as u32,
+            );
 
-    pub fn end_scene(&self) {
-        let current_frame = self.presentation_sync.current_frame;
-        let resources = &self.frame_resources[current_frame];
-        let primary = resources.primary;
-        let secondaries = &resources.secondaries;
+            set_scissor_and_viewport(&self.device_table, secondary, self.render_target.extent);
+            bind_graphics_pipeline(&self.device_table, secondary, self.material_text.pipeline);
+            bind_sampled_image_descriptor(
+                &self.device_table,
+                secondary,
+                self.material_text.pipeline_layout,
+                resources.descriptor_sets[idx],
+            );
+
+            bind_vertex_buffer(
+                &self.device_table,
+                secondary,
+                &self.vertex_buffer,
+                gid.offset as vk::DeviceSize,
+            );
+            (self.device_table.cmd_draw)(secondary, gid.num_vertices as u32, 1, 0, 0);
+            (self.device_table.end_command_buffer)(secondary);
+        }
 
         // Execute all recorder secondary command buffers
         (self.device_table.cmd_execute_commands)(
             primary,
-            secondaries.len() as u32,
-            secondaries.as_ptr(),
+            resources.secondaries.len() as u32,
+            resources.secondaries.as_ptr(),
         );
 
         (self.device_table.cmd_end_render_pass)(primary);
+
         command_buffer_end_and_submit(
             &self.device_table,
             primary,
@@ -758,6 +831,8 @@ impl Renderer {
 
         let material_sprite =
             Material::sprite(&device_table, *device, render_target.render_pass).unwrap();
+        let material_text =
+            Material::text(&device_table, *device, render_target.render_pass).unwrap();
         let num_images = render_target.images.len();
         // Synchronization primitives required for presentation
         let presentation_sync = PresentationSync::create(&device_table, *device, num_images);
@@ -791,11 +866,13 @@ impl Renderer {
 
         let renderer = Self {
             frame_resources,
+            scene: Scene::default(),
             sprites: Vec::new(),
             textures: Vec::new(),
             vertex_buffer,
             transfer_pool,
             material_sprite,
+            material_text,
             presentation_sync,
             render_target,
             device,
@@ -1057,6 +1134,56 @@ fn allocate_command_buffer(
     let mut command_buffer = null_mut();
     (table.allocate_command_buffers)(device, &command_buffer_info, &mut command_buffer);
     return command_buffer;
+}
+
+fn allocate_command_buffers(
+    device_table: &DeviceTable,
+    device: *mut vk::Device,
+    command_pool: *mut vk::CommandPool,
+    level: vk::CommandBufferLevel,
+    count: usize,
+) -> Option<Box<[*mut vk::CommandBuffer]>> {
+    let info = vk::CommandBufferAllocateInfo {
+        stype: vk::StructureType::CommandBufferAllocateInfo,
+        next: null(),
+        command_pool,
+        level,
+        command_buffer_count: count as u32,
+    };
+
+    let mut command_buffers = vec![null_mut(); count].into_boxed_slice();
+    let result =
+        (device_table.allocate_command_buffers)(device, &info, command_buffers.as_mut_ptr());
+    if result != vk::Result::Success || command_buffers.iter().any(|c| c.is_null()) {
+        return None;
+    }
+
+    return Some(command_buffers);
+}
+
+fn allocate_descriptor_sets(
+    device_table: &DeviceTable,
+    device: *mut vk::Device,
+    pool: *mut vk::DescriptorPool,
+    set_layout: *mut vk::DescriptorSetLayout,
+    count: usize,
+) -> Option<Box<[*mut vk::DescriptorSet]>> {
+    let set_layouts = vec![set_layout; count];
+    let info = vk::DescriptorSetAllocateInfo {
+        stype: vk::StructureType::DescriptorSetAllocateInfo,
+        next: null(),
+        descriptor_pool: pool,
+        descriptor_set_count: count as u32,
+        set_layouts: set_layouts.as_ptr(),
+    };
+
+    let mut sets = vec![null_mut(); count].into_boxed_slice();
+    let result = (device_table.allocate_descriptor_sets)(device, &info, sets.as_mut_ptr());
+    if result != vk::Result::Success || sets.iter().any(|set| set.is_null()) {
+        return None;
+    }
+
+    return Some(sets);
 }
 
 fn allocate_memory(
@@ -1496,7 +1623,7 @@ fn create_sampler(table: &DeviceTable, device: *mut vk::Device) -> Option<NonNul
         mip_lod_bias: 0.0,
         anisotropy_enable: false as u32,
         max_anisotropy: 0.0,
-        compare_enable: false as u32,
+        compare_enable: true as u32,
         compare_op: vk::CompareOp::Equal,
         min_lod: 0.0,
         max_lod: 0.0,
@@ -1582,24 +1709,6 @@ fn descriptor_pool_create(
     let mut descriptor_pool = null_mut();
     (dt.create_descriptor_pool)(device, &info, null(), &mut descriptor_pool);
     return descriptor_pool;
-}
-
-fn descriptor_set_allocate(
-    dt: &DeviceTable,
-    device: *mut vk::Device,
-    pool: *mut vk::DescriptorPool,
-    set_layout: *mut vk::DescriptorSetLayout,
-) -> *mut vk::DescriptorSet {
-    let info = vk::DescriptorSetAllocateInfo {
-        stype: vk::StructureType::DescriptorSetAllocateInfo,
-        next: null(),
-        descriptor_pool: pool,
-        descriptor_set_count: 1,
-        set_layouts: &set_layout,
-    };
-    let mut set = null_mut();
-    (dt.allocate_descriptor_sets)(device, &info, &mut set);
-    return set;
 }
 
 fn descriptor_set_update_sampled_image(

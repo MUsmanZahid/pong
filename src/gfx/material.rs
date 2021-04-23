@@ -319,11 +319,11 @@ fn create_graphics_pipeline(
 
     let attachment_state = vk::PipelineColorBlendAttachmentState {
         blend_enable: true as u32,
-        src_color_blend_factor: vk::BlendFactor::SourceColor,
-        dst_color_blend_factor: vk::BlendFactor::OneMinusSourceColor,
+        src_color_blend_factor: vk::BlendFactor::SourceAlpha,
+        dst_color_blend_factor: vk::BlendFactor::OneMinusSourceAlpha,
         color_blend_op: vk::BlendOp::Add,
-        src_alpha_blend_factor: vk::BlendFactor::SourceAlpha,
-        dst_alpha_blend_factor: vk::BlendFactor::OneMinusSourceAlpha,
+        src_alpha_blend_factor: vk::BlendFactor::One,
+        dst_alpha_blend_factor: vk::BlendFactor::Zero,
         alpha_blend_op: vk::BlendOp::Add,
         color_write_mask: vk::ColorComponentFlagBits::R as u32
             | vk::ColorComponentFlagBits::G as u32

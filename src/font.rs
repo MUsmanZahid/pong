@@ -24,10 +24,12 @@ pub(crate) struct Glyph {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GlyphUV {
-    pub(crate) width: f32,
-    pub(crate) height: f32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     pub(crate) offset_x: f32,
     pub(crate) offset_y: f32,
+    pub(crate) width_uv: f32,
+    pub(crate) height_uv: f32
 }
 
 pub(crate) fn generate_bitmap(
@@ -56,10 +58,12 @@ pub(crate) fn generate_bitmap(
     let mut glyphs_uv = [unsafe { std::mem::zeroed() }; NUM_ASCII_GLYPHS];
     for (glyph_uv, glyph) in glyphs_uv.iter_mut().zip(glyphs.iter()) {
         *glyph_uv = GlyphUV {
-            width: glyph.width as f32 / bitmap.width as f32,
-            height: glyph.height as f32 / bitmap.height as f32,
+            width: glyph.width,
+            height: glyph.height,
             offset_x: glyph.offset_x as f32 / bitmap.width as f32,
             offset_y: glyph.offset_y as f32 / bitmap.height as f32,
+            width_uv: glyph.width as f32 / bitmap.width as f32,
+            height_uv: glyph.height as f32 / bitmap.height as f32,
         };
     }
 
@@ -186,6 +190,11 @@ impl CoverageMap {
                     };
 
                     self.draw_glyph(&glyphs[offset as usize], bitmap.buffer);
+
+                    glyphs[offset as usize].width = (glyph_metrics.horiAdvance / 64) as u32;
+                    glyphs[offset as usize].height = (face_metrics.height / 64) as u32;
+                    glyphs[offset as usize].offset_x = current_advance as i32;
+                    glyphs[offset as usize].offset_y = (i as i64 * face_metrics.height / 64) as i32;
                 }
 
                 current_advance += (glyph_metrics.horiAdvance / 64) as u32;

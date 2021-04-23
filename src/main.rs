@@ -31,12 +31,62 @@ mod input {
 }
 
 mod math {
-    use std::ops::{AddAssign, Neg};
+    use std::ops::{Add, AddAssign, Neg};
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct Rectangle {
+        pub left_top: Vector2,
+        pub right_bottom: Vector2,
+    }
+
+    impl Rectangle {
+        pub fn extend(mut self, x: f32, y: f32) -> Self {
+            let extension = Vector2 { x, y };
+            self.right_bottom += extension;
+            self
+        }
+
+        pub fn translate(mut self, x: f32, y: f32) -> Self {
+            let translation = Vector2 { x, y };
+            self.left_top += translation;
+            self.right_bottom += translation;
+
+            self
+        }
+
+        pub fn zero() -> Self {
+            let zero = Vector2::fill(0.0);
+            Self {
+                left_top: zero,
+                right_bottom: zero,
+            }
+        }
+    }
 
     #[derive(Clone, Copy, Debug)]
     pub struct Vector2 {
         pub x: f32,
         pub y: f32,
+    }
+
+    impl Vector2 {
+        pub fn fill(value: f32) -> Self {
+            Self {
+                x: value,
+                y: value,
+            }
+        }
+    }
+
+    impl Add for Vector2 {
+        type Output = Self;
+        
+        fn add(mut self, rhs: Self) -> Self::Output {
+            self.x += rhs.x;
+            self.y += rhs.y;
+
+            self
+        }
     }
 
     impl AddAssign for Vector2 {
@@ -46,13 +96,36 @@ mod math {
         }
     }
 
+    impl From<[f32; 2]> for Vector2 {
+        fn from(a: [f32; 2]) -> Self {
+            Self {
+                x: a[0],
+                y: a[1],
+            }
+        }
+    }
+
     impl Neg for Vector2 {
         type Output = Self;
 
         fn neg(mut self) -> Self::Output {
             self.x = -self.x;
             self.y = -self.y;
-            return self;
+            self
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct Vector4 {
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+        pub w: f32,
+    }
+
+    impl Into<[f32; 4]> for Vector4 {
+        fn into(self) -> [f32; 4] {
+            [self.x, self.y, self.z, self.w]
         }
     }
 }
@@ -250,8 +323,10 @@ enum GameState {
     SetActive,
 }
 
+use slotmap;
+
 fn main() {
-    let _font_path = cstr!("/usr/share/fonts/TTF/Comfortaa-Light.ttf");
+    let font_path = cstr!("/usr/share/fonts/TTF/Comfortaa-Light.ttf");
     let mut window = Window::new("Pong!", "rose", 800, 600);
     let mut renderer = Renderer::init(&window);
 

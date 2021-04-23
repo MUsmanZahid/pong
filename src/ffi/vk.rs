@@ -13,6 +13,7 @@ pub const HEADER_VERSION_COMPLETE: u32 = make_version!(1, 2, HEADER_VERSION);
 
 // Constants
 pub const API_VERSION_1_0: u32 = make_version!(1, 0, 0);
+pub const API_VERSION_1_2: u32 = make_version!(1, 2, 0);
 pub const MAX_DESCRIPTION_SIZE: usize = 256;
 pub const MAX_EXTENSION_NAME_SIZE: usize = 256;
 pub const MAX_MEMORY_HEAPS: usize = 16;

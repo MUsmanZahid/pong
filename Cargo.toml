@@ -1,5 +1,5 @@
 [package]
-name = "pong"
+name = "thyrox"
 version = "0.1.0"
 authors = ["Usman Zahid <usmanzahid1998@gmail.com>"]
 edition = "2018"
@@ -9,3 +9,7 @@ edition = "2018"
 [dependencies]
 freetype = "0.7.0"
 png = "0.16.8"
+slotmap = { path = "slotmap" }
+
+[workspace]
+members = ["slotmap"]
